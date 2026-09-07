@@ -1,0 +1,9 @@
+name: Blocker
+description: 3回の仮説・検証・結果と再開条件
+body:
+  - type: textarea
+    id: details
+    attributes:
+      label: 3回の仮説・検証・結果と再開条件
+    validations:
+      required: true
