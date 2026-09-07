@@ -8,9 +8,9 @@ GitHub Issueに目的・判断・詰まり、PRに変更と検証、docsに設�
 
 - AGENTS.md / CLAUDE.md：導入。
 - Issue / PR templates：導入。
-- CI：lint・型・自動テスト・build・ブラウザーテスト・本番依存監査を `CI / verify` に定義。初回の実行結果はPRで確認する。
-- branch保護：初回CIの実績確認後、PR必須・実際のチェック名必須・force push/削除禁止を設定しreadbackする。未確認段階を設定済みと扱わない。
-- Project：既存の開発ProjectへIssueを登録。進捗はIssue/PRでも確認できる。
+- CI：lint・型・自動テスト・build・ブラウザーテスト・本番依存監査の `verify` が[初回実行](https://github.com/SHOHE001/task-control/actions/runs/34137815917)で成功。
+- main保護：APIで設定後にreadback済み。PR必須、GitHub Actions（app 15368）の `verify` 必須、最新baseとの同期必須、未解決会話の解決必須、管理者にも適用、force push/削除は禁止。個人開発のため他人の承認人数は0。
+- Project：既存の開発Projectへ[Issue #1](https://github.com/SHOHE001/task-control/issues/1)を登録し、担当CodexとReview状態をread/write。変更・CIは[PR #2](https://github.com/SHOHE001/task-control/pull/2)で追跡。
 - ローカル検証コマンドはAGENTS.mdとpackage.jsonを正本とする。
 
 サーバー配置や外部サービスへの実データ書き込みは、GitHubへのソース公開と別の操作。利用者の設定・許可を確認する。
