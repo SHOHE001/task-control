@@ -1,0 +1,12 @@
+CREATE TABLE IF NOT EXISTS migrations(version INTEGER PRIMARY KEY);
+CREATE TABLE tasks(id TEXT PRIMARY KEY, data TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE history(id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT NOT NULL, before_data TEXT, after_data TEXT, at TEXT NOT NULL);
+CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE users(id INTEGER PRIMARY KEY CHECK(id=1), password TEXT NOT NULL);
+CREATE TABLE sessions(id TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+CREATE TABLE jobs(id TEXT PRIMARY KEY, task_id TEXT, revision INTEGER, kind TEXT NOT NULL, due INTEGER NOT NULL, expires INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, lease INTEGER, error TEXT, accepted_at INTEGER, opened_at INTEGER);
+CREATE INDEX jobs_due ON jobs(status,due);
+CREATE TABLE subscriptions(id TEXT PRIMARY KEY, data TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE deliveries(job_id TEXT NOT NULL, subscription_id TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY(job_id,subscription_id));
+CREATE TABLE sync(task_id TEXT PRIMARY KEY, calendar_id TEXT NOT NULL, event_id TEXT NOT NULL, desired INTEGER NOT NULL, synced INTEGER, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_try INTEGER NOT NULL DEFAULT 0, error TEXT);
+INSERT INTO migrations VALUES(1);

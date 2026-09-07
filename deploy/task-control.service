@@ -1,0 +1,22 @@
+[Unit]
+Description=task-control web
+After=network.target
+
+[Service]
+Type=simple
+User=task-control
+Group=task-control
+WorkingDirectory=/opt/task-control
+EnvironmentFile=/opt/task-control/.env
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/task-control/data /opt/task-control/backups
+
+[Install]
+WantedBy=multi-user.target

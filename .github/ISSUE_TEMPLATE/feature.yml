@@ -1,0 +1,9 @@
+name: Feature
+description: 目的と受入条件
+body:
+  - type: textarea
+    id: details
+    attributes:
+      label: 目的と受入条件
+    validations:
+      required: true

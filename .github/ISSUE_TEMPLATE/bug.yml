@@ -1,0 +1,9 @@
+name: Bug
+description: 再現手順・期待結果・実際の結果（個人データは記載しない）
+body:
+  - type: textarea
+    id: details
+    attributes:
+      label: 再現手順・期待結果・実際の結果（個人データは記載しない）
+    validations:
+      required: true
