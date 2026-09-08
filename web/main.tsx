@@ -67,6 +67,7 @@ function App() {
   const [filter, setFilter] = useState("open");
   const detailId = useRef<string | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const titleInput = useRef<HTMLInputElement>(null);
   const requestGeneration = useRef(0);
   const zone = settings?.preferences.zone ?? "Asia/Tokyo";
   async function refresh() {
@@ -111,7 +112,8 @@ function App() {
   }, []);
   useEffect(() => {
     window.scrollTo(0, 0);
-    heading.current?.focus({ preventScroll: true });
+    const target = view === "inbox" ? titleInput.current : heading.current;
+    target?.focus({ preventScroll: true });
   }, [view, logged]);
   useEffect(() => {
     if (!logged) return;
@@ -642,6 +644,7 @@ function App() {
                     課題の名前
                     <input
                       name="title"
+                      ref={titleInput}
                       maxLength={200}
                       placeholder="例：英語のレポート"
                       autoComplete="off"
