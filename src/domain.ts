@@ -81,6 +81,22 @@ export interface Task {
   deadline: Deadline;
   deadlineConfirmedAt: string | null;
   planAt: string | null;
+  startPlan?: {
+    durationMinutes: number;
+    action?: string;
+    origin: "automatic" | "requested" | "manual";
+    reason: string;
+  };
+  intake?: {
+    version: 1;
+    mode: "direct" | "source";
+    receivedAt: string;
+    referenceAt: string | null;
+    zone: string;
+    deadlineText: string;
+    startText: string;
+    notes: string[];
+  };
   next: string;
   stepDone: string;
   totalDone: string;
@@ -250,4 +266,10 @@ export function choose(
             DateTime.fromMillis(now, { zone }).plus({ days: 3 }).toISODate()!),
     ),
   };
+}
+
+export function smallAction(title: string) {
+  if (/レポート|論文|作文/.test(title)) return "資料を1つ開く";
+  if (/勉強|試験|問題|演習/.test(title)) return "問題を1問読む";
+  return "課題ページを開く";
 }

@@ -8,6 +8,7 @@ import {
   ended,
   preferencesSchema,
   type Task,
+  smallAction,
 } from "./domain.ts";
 export class Store {
   db: DatabaseSync;
@@ -27,6 +28,15 @@ export class Store {
         this.db.exec(
           readFileSync(
             new URL("../migrations/001.sql", import.meta.url),
+            "utf8",
+          ),
+        );
+      if (
+        !this.db.prepare("SELECT version FROM migrations WHERE version=2").get()
+      )
+        this.db.exec(
+          readFileSync(
+            new URL("../migrations/002.sql", import.meta.url),
             "utf8",
           ),
         );
@@ -73,7 +83,7 @@ export class Store {
       });
     return JSON.parse(row.data as string);
   }
-  create(input: unknown) {
+  create(input: unknown, initialize?: (t: Task) => void) {
     const x = createSchema.parse(input);
     const now = new Date().toISOString();
     const d = extract(x.original);
@@ -85,7 +95,7 @@ export class Store {
       deadline: d,
       deadlineConfirmedAt: null,
       planAt: null,
-      next: d.uncertainty[0] || "課題ページを開き、条件を一つ確認する",
+      next: smallAction(x.title || x.original),
       stepDone: "確認した条件が1行残っている",
       totalDone: "",
       workUrl: "",
@@ -102,6 +112,7 @@ export class Store {
       notificationRevision: 1,
       deadlineRevision: 1,
     };
+    initialize?.(t);
     this.transaction(() => {
       this.db
         .prepare("INSERT INTO tasks(id,data) VALUES(?,?)")
@@ -150,6 +161,11 @@ export class Store {
             "UPDATE sync SET desired=?,status='pending',attempts=0,next_try=0,error=NULL WHERE task_id=?",
           )
           .run(t.deadlineRevision, id);
+      this.db
+        .prepare(
+          "UPDATE work_sync SET desired=?,status='pending',attempts=0,next_try=0,error=NULL WHERE task_id=?",
+        )
+        .run(t.revision, id);
       return t;
     });
   }

@@ -2,7 +2,7 @@ import { DateTime } from "luxon";
 import webpush from "web-push";
 import type { Store } from "./db.ts";
 import { ended } from "./domain.ts";
-import { Google, syncOne } from "./integrations.ts";
+import { Google, syncOne, syncWork } from "./integrations.ts";
 export function enqueue(
   store: Store,
   id: string,
@@ -158,7 +158,7 @@ export async function runNotifications(
             body:
               job.kind === "weekly"
                 ? "大学の課題一覧と、登録した課題を照合する時間です"
-                : "ページを開いて、次の一手を確認するところから",
+                : "5分だけ始める時間です。作業ページを開いてみましょう",
             tag: job.id,
             url: `/?job=${encodeURIComponent(String(job.id))}`,
             jobId: job.id,
@@ -204,11 +204,19 @@ export async function tick(
   schedule(store, now);
   await runNotifications(store, now, send);
   if (store.get("calendarId", "") && store.get("googleToken", ""))
-    for (const t of store.list())
+    for (const t of store.list()) {
       if (
         t.deadline.confirmed ||
         store.db.prepare("SELECT task_id FROM sync WHERE task_id=?").get(t.id)
       )
         await syncOne(store, t, google, now);
+      if (
+        t.planAt ||
+        store.db
+          .prepare("SELECT task_id FROM work_sync WHERE task_id=?")
+          .get(t.id)
+      )
+        await syncWork(store, t, google, now);
+    }
   store.db.prepare("DELETE FROM sessions WHERE expires<?").run(now);
 }

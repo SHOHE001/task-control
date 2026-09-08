@@ -62,12 +62,14 @@ function App() {
   const [settings, setSettings] = useState<any>(null);
   const [detail, setDetail] = useState<any>(null);
   const [modal, setModal] = useState<Modal | null>(null);
+  const [intakeSaved, setIntakeSaved] = useState<Task | null>(null);
+  const savedTask = tasks.find((t) => t.id === intakeSaved?.id) ?? intakeSaved;
   const [guide, setGuide] = useState(false);
   const [suggestion, setSuggestion] = useState<any>(null);
   const [filter, setFilter] = useState("open");
   const detailId = useRef<string | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
-  const titleInput = useRef<HTMLInputElement>(null);
+  const titleInput = useRef<HTMLTextAreaElement>(null);
   const requestGeneration = useRef(0);
   const zone = settings?.preferences.zone ?? "Asia/Tokyo";
   async function refresh() {
@@ -112,9 +114,10 @@ function App() {
   }, []);
   useEffect(() => {
     window.scrollTo(0, 0);
-    const target = view === "inbox" ? titleInput.current : heading.current;
+    const target =
+      view === "inbox" && !intakeSaved ? titleInput.current : heading.current;
     target?.focus({ preventScroll: true });
-  }, [view, logged]);
+  }, [view, logged, intakeSaved]);
   useEffect(() => {
     if (!logged) return;
     try {
@@ -138,6 +141,7 @@ function App() {
   }
   function navigate(next: View) {
     setView(next);
+    if (next === "inbox") setIntakeSaved(null);
     setModal(null);
     setError("");
     setNotice("");
@@ -616,69 +620,130 @@ function App() {
                     課題を追加
                   </h1>
                   <p className="muted">
-                    名前だけで保存できます。まだ決まっていないことは、あとで。
+                    名前だけでも、締切や「いつやる」を含む一文でも。
                   </p>
                 </div>
               </div>
               <div className="narrow">
-                <form
-                  className="panel add-form"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const f = new FormData(e.currentTarget);
-                    void perform(async () => {
-                      const t = await api("/tasks", {
-                        title: f.get("title"),
-                        original: f.get("original"),
-                        sourceUrl: f.get("sourceUrl"),
+                {savedTask ? (
+                  <section className="panel" aria-label="保存結果">
+                    <p className="eyebrow">保存しました</p>
+                    <h2>{savedTask.title}</h2>
+                    <p>
+                      <strong>最初は：{savedTask.next}</strong>
+                    </p>
+                    <p>
+                      着手予定：
+                      {savedTask.planAt
+                        ? `${formatTime(savedTask.planAt, zone)}（${zone}）・${savedTask.startPlan?.durationMinutes ?? 20}分`
+                        : "未作成"}
+                    </p>
+                    <p className="muted">{savedTask.startPlan?.reason}</p>
+                    {savedTask.intake?.notes.map((note, i) => (
+                      <p className="caption" key={i}>
+                        {note}
+                      </p>
+                    ))}
+                    <p>{deadlineText(savedTask.deadline)}</p>
+                    {!savedTask.deadline.confirmed &&
+                      savedTask.intake?.deadlineText && (
+                        <p className="hint">
+                          「{savedTask.intake.deadlineText}
+                          」は未確認の候補です。年や時間は補っていません。
+                        </p>
+                      )}
+                    <p className="muted">
+                      {settings?.google.calendarId
+                        ? "着手予定は専用カレンダーへの同期対象です。同期結果は詳細で確認できます。"
+                        : "Calendarは未接続です。予定はここに保存しました。連携は設定から行えます。"}
+                    </p>
+                    <div className="actions">
+                      <button
+                        className="primary"
+                        onClick={() => navigate("home")}
+                      >
+                        今日の画面へ
+                      </button>
+                      {!!savedTask.intake?.deadlineText &&
+                        !savedTask.deadline.confirmed && (
+                          <button
+                            className="secondary"
+                            onClick={() => show("deadline", savedTask)}
+                          >
+                            締切だけ確認
+                          </button>
+                        )}
+                    </div>
+                    <div className="actions">
+                      <button
+                        className="text-button"
+                        onClick={() => show("plan", savedTask)}
+                      >
+                        予定を変更・取り消す
+                      </button>
+                      <button
+                        className="text-button"
+                        onClick={() => void perform(() => open(savedTask))}
+                      >
+                        詳細を見る
+                      </button>
+                      <button
+                        className="text-button"
+                        onClick={() => setIntakeSaved(null)}
+                      >
+                        もう1件追加
+                      </button>
+                    </div>
+                  </section>
+                ) : (
+                  <form
+                    className="panel add-form"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const f = new FormData(e.currentTarget);
+                      void perform(async () => {
+                        const result = await api("/intake", {
+                          text: f.get("text"),
+                          mode: f.has("source") ? "source" : "direct",
+                        });
+                        setIntakeSaved(result.task);
+                        await refresh();
                       });
-                      await refresh();
-                      await open(t);
-                      setNotice(
-                        "追加しました。締切を入れても、そのまま始めても大丈夫です。",
-                      );
-                    });
-                  }}
-                >
-                  <label>
-                    課題の名前
-                    <input
-                      name="title"
-                      ref={titleInput}
-                      maxLength={200}
-                      placeholder="例：英語のレポート"
-                      autoComplete="off"
-                    />
-                  </label>
-                  <label>
-                    届いた案内（任意）
-                    <textarea
-                      name="original"
-                      rows={5}
-                      placeholder="先生からのメールや、課題ページの文章を貼り付ける"
-                    />
-                  </label>
-                  <p className="hint">
-                    案内だけを貼り付けても保存できます。書かれている締切は、あとで一緒に見られます。
-                  </p>
-                  <details>
-                    <summary>案内のリンクも残す</summary>
+                    }}
+                  >
                     <label>
-                      案内のURL
-                      <input
-                        name="sourceUrl"
-                        type="url"
-                        placeholder="https://…"
+                      課題名や、やりたいこと
+                      <textarea
+                        name="text"
+                        ref={titleInput}
+                        maxLength={10000}
+                        rows={4}
+                        required
+                        placeholder="9月20日までに経済学レポート。明日の18時に少しだけやる"
                       />
                     </label>
-                  </details>
-                  <button className="primary wide" disabled={busy}>
-                    {busy ? "保存しています…" : "課題を保存"}
-                    <Icon name="add" />
-                  </button>
-                </form>
+                    <p className="hint">
+                      小さな最初の行動と着手予定を作ります。締切は確認するまで確定しません。
+                    </p>
+                    <details>
+                      <summary>案内を貼り付ける場合</summary>
+                      <label className="check">
+                        <input type="checkbox" name="source" />
+                        メールやLMSの文章（発信日時が不明）
+                      </label>
+                      <p className="caption">
+                        案内の「明日」を、今日の翌日と取り違えないための指定です。
+                      </p>
+                    </details>
+                    <button className="primary wide" disabled={busy}>
+                      {busy ? "保存しています…" : "課題を保存"}
+                      <Icon name="add" />
+                    </button>
+                  </form>
+                )}
                 <p className="caption center">
-                  分類や優先順位を、いま決める必要はありません。
+                  普段の予定はAny Plannerへ。Google
+                  Calendarの専用カレンダーを連携して使えます。
                 </p>
               </div>
             </>
@@ -1053,7 +1118,7 @@ function App() {
                   <details className="panel">
                     <summary>通知とカレンダー</summary>
                     <p>
-                      カレンダー：
+                      締切のカレンダー：
                       {detail.sync?.status === "synced"
                         ? "同期済み"
                         : detail.sync?.status === "failed"
@@ -1062,6 +1127,39 @@ function App() {
                     </p>
                     {detail.sync?.error && (
                       <p className="error">{detail.sync.error}</p>
+                    )}
+                    <p>
+                      着手予定のカレンダー：
+                      {detail.workSync?.status === "synced"
+                        ? "同期済み"
+                        : detail.workSync?.status === "failed"
+                          ? "同期できませんでした"
+                          : "まだ同期していません"}
+                    </p>
+                    {detail.workSync?.error && (
+                      <p className="error">{detail.workSync.error}</p>
+                    )}
+                    {task.startPlan && (
+                      <p className="caption">
+                        {task.startPlan.reason}・
+                        {task.startPlan.durationMinutes}分
+                      </p>
+                    )}
+                    {task.intake && (
+                      <details>
+                        <summary>入力の解釈</summary>
+                        <p>
+                          受付：
+                          {formatTime(task.intake.receivedAt, task.intake.zone)}
+                        </p>
+                        <p>
+                          基準：{task.intake.referenceAt ?? "元情報の日時不明"}
+                          （{task.intake.zone}）
+                        </p>
+                        {task.intake.notes.map((note, i) => (
+                          <p key={i}>{note}</p>
+                        ))}
+                      </details>
                     )}
                     {detail.jobs.map((j: any, i: number) => (
                       <p key={i}>

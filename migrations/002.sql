@@ -1,0 +1,2 @@
+CREATE TABLE work_sync(task_id TEXT PRIMARY KEY, calendar_id TEXT NOT NULL, event_id TEXT NOT NULL, desired INTEGER NOT NULL, synced INTEGER, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_try INTEGER NOT NULL DEFAULT 0, error TEXT);
+INSERT INTO migrations VALUES(2);

@@ -7,7 +7,7 @@ import {
 import { DateTime } from "luxon";
 import { z } from "zod";
 import type { Store } from "./db.ts";
-import { dueMillis, type Task } from "./domain.ts";
+import { dueMillis, ended, smallAction, type Task } from "./domain.ts";
 export function seal(value: string) {
   const key = Buffer.from(process.env.ENCRYPTION_KEY ?? "", "hex");
   if (key.length !== 32) throw new Error("ENCRYPTION_KEYの設定が必要です");
@@ -139,37 +139,90 @@ export function eventBody(t: Task) {
     ? { dateTime: new Date(dueMillis(d)! + 60000).toISOString() }
     : { date: DateTime.fromISO(d.date).plus({ days: 1 }).toISODate() };
   return {
-    summary: `${t.title}${timed ? "（提出期限）" : "（時刻未確認）"}`,
+    summary: `${t.title}${timed ? "（提出期限）" : "（締切・時刻未確認）"}`,
     description: "編集元はtask-controlです。本人が根拠を確認した期限。",
     start,
     end,
     reminders: { useDefault: false, overrides: [] },
-    extendedProperties: { private: { taskControlId: t.id } },
+    extendedProperties: {
+      private: { taskControlId: t.id, taskControlKind: "deadline" },
+    },
   };
+}
+export interface CalendarAdapter {
+  call(path: string, method?: string, body?: unknown): Promise<any>;
+}
+export function workEventBody(t: Task) {
+  if (!t.planAt || ended(t) || t.state === "work_done") return null;
+  return {
+    summary: `${t.title}：${t.startPlan?.action ?? t.next}（着手）`,
+    description:
+      "着手の予定です。締切ではありません。変更・取消はtask-controlで行ってください。" +
+      (t.startPlan?.reason ?? ""),
+    start: { dateTime: t.planAt },
+    end: {
+      dateTime: new Date(
+        Date.parse(t.planAt) + (t.startPlan?.durationMinutes ?? 20) * 60000,
+      ).toISOString(),
+    },
+    reminders: { useDefault: false, overrides: [] },
+    extendedProperties: {
+      private: { taskControlId: t.id, taskControlKind: "start" },
+    },
+  };
+}
+export async function syncWork(
+  store: Store,
+  t: Task,
+  google: CalendarAdapter,
+  now = Date.now(),
+) {
+  return syncEvent(store, t, google, now, "start");
 }
 export async function syncOne(
   store: Store,
   t: Task,
-  google: Pick<Google, "call">,
+  google: CalendarAdapter,
   now = Date.now(),
 ) {
+  return syncEvent(store, t, google, now, "deadline");
+}
+async function syncEvent(
+  store: Store,
+  t: Task,
+  google: CalendarAdapter,
+  now: number,
+  kind: "start" | "deadline",
+) {
+  // A prior event sync may have awaited the network while the task changed.
+  t = store.task(t.id);
   const calendar = store.get("calendarId", "");
   if (!calendar) return;
-  const eid = eventId(t.id);
+  const eid = eventId(kind === "start" ? `${t.id}:start` : t.id);
+  const table = kind === "start" ? "work_sync" : "sync";
+  const revision = kind === "start" ? t.revision : t.deadlineRevision;
+  const owned = (event: any) =>
+    event.extendedProperties?.private?.taskControlId === t.id &&
+    (kind === "start"
+      ? event.extendedProperties?.private?.taskControlKind === "start"
+      : !event.extendedProperties?.private?.taskControlKind ||
+        event.extendedProperties.private.taskControlKind === "deadline");
   store.db
     .prepare(
-      "INSERT INTO sync(task_id,calendar_id,event_id,desired,status) VALUES(?,?,?,?,'pending') ON CONFLICT(task_id) DO NOTHING",
+      `INSERT INTO ${table}(task_id,calendar_id,event_id,desired,status) VALUES(?,?,?,?,'pending') ON CONFLICT(task_id) DO UPDATE SET desired=excluded.desired,status=CASE WHEN desired!=excluded.desired THEN 'pending' ELSE status END,attempts=CASE WHEN desired!=excluded.desired THEN 0 ELSE attempts END,next_try=CASE WHEN desired!=excluded.desired THEN 0 ELSE next_try END`,
     )
-    .run(t.id, calendar, eid, t.deadlineRevision);
-  const row = store.db.prepare("SELECT * FROM sync WHERE task_id=?").get(t.id)!;
+    .run(t.id, calendar, eid, revision);
+  const row = store.db
+    .prepare(`SELECT * FROM ${table} WHERE task_id=?`)
+    .get(t.id)!;
   if (
-    (row.status === "synced" && row.synced === t.deadlineRevision) ||
+    (row.status === "synced" && row.synced === revision) ||
     Number(row.next_try) > now ||
     Number(row.attempts) >= 5
   )
     return;
   const path = `calendars/${encodeURIComponent(calendar)}/events`;
-  const body = eventBody(t);
+  const body = kind === "start" ? workEventBody(t) : eventBody(t);
   try {
     let existing: any = null;
     try {
@@ -177,11 +230,13 @@ export async function syncOne(
     } catch (e) {
       if ((e as any).status !== 404) throw e;
     }
+    if (existing && !owned(existing)) throw new Error("管理対象外の予定です");
+    const current = store.task(t.id);
     if (
-      existing &&
-      existing.extendedProperties?.private?.taskControlId !== t.id
+      (kind === "start" ? current.revision : current.deadlineRevision) !==
+      revision
     )
-      throw new Error("管理対象外の予定です");
+      return;
     if (body) {
       if (existing) await google.call(`${path}/${eid}`, "PUT", body);
       else
@@ -190,22 +245,25 @@ export async function syncOne(
         } catch (e) {
           if ((e as any).status !== 409) throw e;
           const conflict = await google.call(`${path}/${eid}`);
-          if (conflict.extendedProperties?.private?.taskControlId !== t.id)
-            throw new Error("予定IDが競合しました");
+          if (!owned(conflict)) throw new Error("予定IDが競合しました");
           await google.call(`${path}/${eid}`, "PUT", body);
         }
     } else if (existing) await google.call(`${path}/${eid}`, "DELETE");
     store.db
       .prepare(
-        "UPDATE sync SET synced=?,status=CASE WHEN desired=? THEN 'synced' ELSE 'pending' END,error=NULL,attempts=0 WHERE task_id=?",
+        `UPDATE ${table} SET synced=?,status=CASE WHEN desired=? THEN 'synced' ELSE 'pending' END,error=NULL,attempts=0,next_try=0 WHERE task_id=?`,
       )
-      .run(t.deadlineRevision, t.deadlineRevision, t.id);
+      .run(revision, revision, t.id);
   } catch {
     store.db
       .prepare(
-        "UPDATE sync SET status='failed',error='同期失敗。カレンダー側に古い期限が残っている可能性があります',attempts=attempts+1,next_try=? WHERE task_id=?",
+        `UPDATE ${table} SET status='failed',error='同期失敗。カレンダー側に古い${kind === "start" ? "着手予定" : "期限"}が残っている可能性があります',attempts=attempts+1,next_try=? WHERE task_id=? AND desired=?`,
       )
-      .run(now + Math.min(3600000, 60000 * 2 ** Number(row.attempts)), t.id);
+      .run(
+        now + Math.min(3600000, 60000 * 2 ** Number(row.attempts)),
+        t.id,
+        revision,
+      );
   }
 }
 const suggestionSchema = z
@@ -221,9 +279,9 @@ const suggestionSchema = z
 export async function suggest(store: Store, t: Task, request: Fetch = fetch) {
   const fallback = {
     source: "template",
-    next: t.deadline.uncertainty[0] || "課題条件を一つ読み、要点を1行メモする",
-    stepDone: "確認した要点が1行残っている",
-    resume: t.resume || "次は課題条件を一つ確認する",
+    next: smallAction(t.title),
+    stepDone: "最初の行動をひとつ試せたら十分です",
+    resume: t.resume || `次は「${smallAction(t.title)}」から`,
     evidence: "",
     uncertainty: [],
   };
