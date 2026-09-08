@@ -1,86 +1,89 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { DateTime } from "luxon";
-import { deadlineLabel, type Task } from "../src/domain";
+import type { Task } from "../src/domain";
+import {
+  api,
+  deadlineText,
+  formatTime,
+  historyText,
+  nextText,
+  reasonText,
+  stateText,
+  stepText,
+  jobStates,
+} from "./presentation";
+import {
+  DeadlineForm,
+  EditForm,
+  Guide,
+  Icon,
+  PauseForm,
+  PlanForm,
+  Sheet,
+} from "./components";
+import { Settings } from "./Settings";
 import "./style.css";
-async function api(path: string, body?: unknown) {
-  let r: Response;
-  try {
-    r = await fetch("/api" + path, {
-      method: body === undefined ? "GET" : "POST",
-      headers: body === undefined ? {} : { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-  } catch {
-    throw new Error(
-      "通信できませんでした。変更は保存されていません。接続後にもう一度お試しください。",
-    );
-  }
-  const data = await r.json();
-  if (!r.ok)
-    throw Object.assign(new Error(data.error || "保存できませんでした"), {
-      status: r.status,
-    });
-  return data;
-}
 type View = "home" | "inbox" | "list" | "detail" | "settings";
-const states: Record<string, string> = {
-  ready: "次の一手あり",
-  active: "開始を記録",
-  paused: "再開できます",
-  work_done: "作業終了・提出未確認",
-  closed: "完了",
-  cancelled: "本人が取消",
+type Modal = {
+  kind:
+    | "deadline"
+    | "plan"
+    | "pause"
+    | "edit"
+    | "smaller"
+    | "submit"
+    | "finish"
+    | "cancel";
+  task: Task;
 };
-const jobStates: Record<string, string> = {
-  pending: "予定あり",
-  sending: "送信処理中",
-  accepted: "送信要求受理・到達不明",
-  cancelled: "無効化済み",
-  expired: "古い通知を省略",
-  failed: "送信失敗",
-};
-function formatTime(value: string | number, zone = "Asia/Tokyo") {
-  return (
-    typeof value === "number"
-      ? DateTime.fromMillis(value)
-      : DateTime.fromISO(value)
-  )
-    .setZone(zone)
-    .toFormat("yyyy/MM/dd HH:mm");
-}
+const guideKey = "task-control:guide:v1";
+const tabs = [
+  { view: "home" as View, label: "今日", icon: "today" as const },
+  { view: "list" as View, label: "課題", icon: "tasks" as const },
+  { view: "inbox" as View, label: "追加", icon: "add" as const },
+  { view: "settings" as View, label: "設定", icon: "settings" as const },
+];
 function App() {
+  const initial = new URLSearchParams(location.search);
+  const initialView = initial.get("view");
   const [view, setView] = useState<View>(
-    (new URLSearchParams(location.search).get("view") as View) || "home",
+    ["home", "inbox", "list", "settings"].includes(initialView ?? "")
+      ? (initialView as View)
+      : "home",
   );
   const [logged, setLogged] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [busy, setBusy] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [home, setHome] = useState<any>({});
-  const [detail, setDetail] = useState<any>(null);
   const [settings, setSettings] = useState<any>(null);
-  const [shrink, setShrink] = useState(false);
-  const [planning, setPlanning] = useState(false);
+  const [detail, setDetail] = useState<any>(null);
+  const [modal, setModal] = useState<Modal | null>(null);
+  const [guide, setGuide] = useState(false);
   const [suggestion, setSuggestion] = useState<any>(null);
-  useEffect(() => {
-    window.scrollTo(0, 0);
-  }, [view]);
+  const [filter, setFilter] = useState("open");
+  const detailId = useRef<string | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const requestGeneration = useRef(0);
+  const zone = settings?.preferences.zone ?? "Asia/Tokyo";
   async function refresh() {
+    const generation = ++requestGeneration.current;
     const [ts, h, s] = await Promise.all([
       api("/tasks"),
       api("/home"),
       api("/settings"),
     ]);
+    if (generation !== requestGeneration.current) return;
     setTasks(ts);
     setHome(h);
     setSettings(s);
     setLogged(true);
-    if (detail) setDetail(await api("/tasks/" + detail.task.id));
+    if (detailId.current) setDetail(await api("/tasks/" + detailId.current));
   }
-  async function run(fn: () => Promise<void>) {
+  async function perform(fn: () => Promise<void>) {
     setBusy(true);
     setError("");
     setNotice("");
@@ -88,7 +91,11 @@ function App() {
       await fn();
     } catch (e) {
       setError((e as Error).message);
-      if ((e as any).status === 401) setLogged(false);
+      if ((e as any).status === 401) {
+        setLogged(false);
+        setModal(null);
+        setGuide(false);
+      }
     } finally {
       setBusy(false);
     }
@@ -103,407 +110,558 @@ function App() {
       void navigator.serviceWorker.register("/sw.js").catch(() => {});
   }, []);
   useEffect(() => {
-    if (logged) {
-      const id = new URLSearchParams(location.search).get("job");
-      if (id)
-        void api("/push/opened", { id })
-          .then(() => history.replaceState(null, "", location.pathname))
-          .catch(() => {});
+    window.scrollTo(0, 0);
+    heading.current?.focus({ preventScroll: true });
+  }, [view, logged]);
+  useEffect(() => {
+    if (!logged) return;
+    try {
+      if (localStorage.getItem(guideKey) !== "done") setGuide(true);
+    } catch {
+      setGuide(true);
     }
+    const id = new URLSearchParams(location.search).get("job");
+    if (id)
+      void api("/push/opened", { id })
+        .then(() => history.replaceState(null, "", location.pathname))
+        .catch(() => {});
   }, [logged]);
-  async function open(t: Task) {
-    setDetail(await api("/tasks/" + t.id));
-    setView("detail");
-    setSuggestion(null);
-    setPlanning(false);
-    setShrink(false);
+  function closeGuide() {
+    try {
+      localStorage.setItem(guideKey, "done");
+    } catch {
+      /* optional browser preference */
+    }
+    setGuide(false);
   }
-  async function action(
+  function navigate(next: View) {
+    setView(next);
+    setModal(null);
+    setError("");
+    setNotice("");
+    setSuggestion(null);
+    if (next !== "detail") detailId.current = null;
+    history.replaceState(
+      null,
+      "",
+      `?view=${next === "detail" ? "home" : next}`,
+    );
+  }
+  async function open(t: Task) {
+    detailId.current = t.id;
+    setDetail(await api("/tasks/" + t.id));
+    navigate("detail");
+  }
+  function show(kind: Modal["kind"], task: Task) {
+    setError("");
+    setNotice("");
+    setSuggestion(null);
+    setModal({ kind, task });
+  }
+  async function mutate(
     t: Task,
-    act: string,
+    action: string,
     extra: Record<string, unknown> = {},
   ) {
-    await api(`/tasks/${t.id}/action`, {
+    const updated = await api(`/tasks/${t.id}/action`, {
       revision: t.revision,
-      action: act,
+      action,
       ...extra,
     });
     await refresh();
+    return updated as Task;
   }
-  function navigate(v: View) {
-    setView(v);
-    setError("");
-    setNotice("");
-    setPlanning(false);
-    setShrink(false);
-    void run(refresh);
+  function begin(t: Task) {
+    const url = t.workUrl || t.sourceUrl;
+    const tab = url ? window.open("about:blank", "_blank") : null;
+    if (tab) tab.opener = null;
+    void perform(async () => {
+      try {
+        const updated = await mutate(t, "start");
+        if (tab) tab.location.href = url;
+        await open(updated);
+        if (url && !tab)
+          setNotice(
+            "作業を始めました。「作業ページを開く」から続けてください。",
+          );
+      } catch (e) {
+        tab?.close();
+        throw e;
+      }
+    });
   }
-  const t: Task | undefined = view === "detail" ? detail?.task : home.task;
-  function Plan({ task }: { task: Task }) {
+  const activeTasks = tasks.filter(
+    (t) => !["closed", "cancelled"].includes(t.state),
+  );
+  const task: Task | undefined = view === "detail" ? detail?.task : home.task;
+  const modalTitles = {
+    deadline: "締切はいつ？",
+    plan: "いつ取り組む？",
+    pause: "途中で休む",
+    edit: "課題の情報を編集",
+    smaller: "始めにくいときは",
+    submit: "提出できましたか？",
+    finish: "作業は終わりましたか？",
+    cancel: "この課題を取りやめますか？",
+  };
+  function card(t: Task, reason?: string) {
+    const active = t.state === "active",
+      submitted = t.state === "work_done";
     return (
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          const f = new FormData(e.currentTarget);
-          const value = String(f.get("when") || "");
-          void run(async () => {
-            const at = value
-              ? DateTime.fromISO(value, {
-                  zone: settings.preferences.zone,
-                }).toISO()
-              : null;
-            await api(`/tasks/${task.id}/plan`, {
-              revision: task.revision,
-              planAt: at,
-            });
-            await refresh();
-            setPlanning(false);
-            setNotice("着手予定を保存しました。提出期限は変わりません。");
-          });
-        }}
-      >
-        <h3>取り組む時間を変える</h3>
-        <p>提出期限とは別の、自分の予定です。</p>
-        <label>
-          着手予定（{settings.preferences.zone}）
-          <input
-            name="when"
-            type="datetime-local"
-            defaultValue={
-              task.planAt
-                ? DateTime.fromISO(task.planAt)
-                    .setZone(settings.preferences.zone)
-                    .toFormat("yyyy-MM-dd'T'HH:mm")
-                : ""
-            }
-          />
-        </label>
-        <div className="actions">
-          <button disabled={busy}>予定を保存</button>
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => setPlanning(false)}
-          >
-            閉じる
-          </button>
-        </div>
-      </form>
-    );
-  }
-  function ActionCard({ task, reason }: { task: Task; reason?: string }) {
-    return (
-      <section className="action-card" data-testid="main-action">
-        <div className="eyebrow">
-          {task.resume ? "ここから再開" : "小さな一歩から"}
-        </div>
-        <p className="task-name">{task.title}</p>
-        <h2>
-          {task.state === "work_done"
-            ? "提出完了画面を開き、提出状況を確認する"
-            : task.next}
-        </h2>
-        {task.resume && (
-          <div className="resume">
-            <span>前回の再開メモ</span>
-            <p>{task.resume}</p>
-          </div>
-        )}
-        <div className="finish">
-          <span>今回、ここまでできれば</span>
-          <p>{task.stepDone || "一つ確認できたら、次の一手を決める"}</p>
-        </div>
-        <p className="deadline">{deadlineLabel(task.deadline)}</p>
-        {task.estimate && <p>今回の目安：{task.estimate}分（本人の設定）</p>}
-        {reason && <p className="reason">{reason}</p>}
-        <div className="actions">
-          <button
-            disabled={busy}
-            onClick={() => {
-              if (task.state === "work_done") {
-                void run(() => open(task));
-                return;
+      <section className="focus-card" data-testid="main-action">
+        <div className="card-top">
+          <span className="pill">
+            <Icon
+              name={
+                submitted
+                  ? "check"
+                  : active
+                    ? "today"
+                    : t.state === "paused"
+                      ? "pause"
+                      : "tasks"
               }
-              const url = task.workUrl || task.sourceUrl;
-              const tab = url ? window.open("about:blank", "_blank") : null;
-              if (tab) tab.opener = null;
-              void run(async () => {
-                try {
-                  await action(task, "start");
-                  if (tab) tab.location.href = url;
-                  else if (url)
-                    setNotice(
-                      "開始を記録しました。下の作業ページのリンクを開いてください。",
-                    );
-                  await open({ ...task, revision: task.revision + 1 });
-                } catch (e) {
-                  tab?.close();
-                  throw e;
-                }
-              });
-            }}
-          >
-            {task.state === "work_done"
-              ? "提出を確認する"
-              : task.state === "paused"
-                ? "再開する"
-                : "始める"}{" "}
-            <span aria-hidden>↗</span>
-          </button>
+            />
+            {stateText[t.state]}
+          </span>
           <button
+            className="text-button"
             disabled={busy}
-            className="secondary"
-            onClick={() => {
-              setShrink(!shrink);
-              setPlanning(false);
-            }}
+            onClick={() => void perform(() => open(t))}
           >
-            もっと小さくする
-          </button>
-          <button
-            className="quiet"
-            onClick={() => {
-              setPlanning(!planning);
-              setShrink(false);
-            }}
-          >
-            時間を変える
+            課題の詳細
+            <Icon name="arrow" />
           </button>
         </div>
-        {(task.workUrl || task.sourceUrl) && (
+        <h2>{t.title}</h2>
+        <button className="deadline-line" onClick={() => show("deadline", t)}>
+          <Icon name="calendar" />
+          <span>{deadlineText(t.deadline)}</span>
+          <span className="text-link">
+            {t.deadline.confirmed ? "変更" : "入力する"}
+          </span>
+        </button>
+        <div className="next-step">
+          <p className="eyebrow">
+            {submitted
+              ? "最後にすること"
+              : t.resume
+                ? "前回の続き"
+                : "まずはここから"}
+          </p>
+          <h3>
+            {submitted
+              ? "提出ページで、送信できたか確認する"
+              : t.resume || nextText(t)}
+          </h3>
+          {!t.resume && !submitted && <p className="muted">{stepText(t)}</p>}
+        </div>
+        {reason && <p className="reason">{reasonText(reason)}</p>}
+        <div className="actions">
+          {submitted ? (
+            <button
+              className="primary grow"
+              disabled={busy}
+              onClick={() => show("submit", t)}
+            >
+              提出済みにする
+              <Icon name="check" />
+            </button>
+          ) : active ? (
+            <>
+              <button
+                className="secondary grow"
+                disabled={busy}
+                onClick={() => show("pause", t)}
+              >
+                <Icon name="pause" />
+                途中で休む
+              </button>
+              <button
+                className="primary grow"
+                disabled={busy}
+                onClick={() => show("finish", t)}
+              >
+                作業が終わった
+                <Icon name="check" />
+              </button>
+            </>
+          ) : (
+            <button
+              className="primary grow"
+              disabled={busy}
+              onClick={() => begin(t)}
+            >
+              {t.state === "paused" ? "続きからはじめる" : "はじめる"}
+              <Icon name="arrow" />
+            </button>
+          )}
+          {!active && !submitted && (
+            <button className="secondary" onClick={() => show("smaller", t)}>
+              始めにくい
+            </button>
+          )}
+        </div>
+        {(t.workUrl || t.sourceUrl) && (
           <a
             className="work-link"
-            href={task.workUrl || task.sourceUrl}
+            href={t.workUrl || t.sourceUrl}
             target="_blank"
             rel="noopener noreferrer"
           >
-            作業ページを開く ↗
+            <Icon name="link" />
+            {submitted ? "提出ページを開く" : "作業ページを開く"}
           </a>
         )}
-        {shrink && (
-          <div className="choices">
-            <p>今、引っかかっていること</p>
-            {[
-              ["unclear", "何をすればよいか分からない"],
-              ["large", "作業が大きすぎる"],
-              ["energy", "今は時間や体力がない"],
-              ["purpose", "必要性に納得できない"],
-            ].map(([reason, label]) => (
-              <button
-                key={reason}
-                disabled={busy}
-                className="secondary"
-                onClick={() => {
-                  if (reason === "energy") {
-                    setPlanning(true);
-                    setShrink(false);
-                  } else
-                    void run(async () => {
-                      await action(task, "smaller", { reason });
-                      setShrink(false);
-                    });
-                }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+        {!active && !submitted && (
+          <button className="text-button" onClick={() => show("plan", t)}>
+            あとで取り組む
+          </button>
         )}
-        {planning && Plan({ task })}
       </section>
+    );
+  }
+  function taskRow(t: Task) {
+    return (
+      <div className="task-row" key={t.id}>
+        <button
+          className="task-open"
+          onClick={() => void perform(() => open(t))}
+        >
+          <span
+            className={`task-symbol ${t.state === "closed" ? "complete" : ""}`}
+          >
+            <Icon name={t.state === "closed" ? "check" : "tasks"} />
+          </span>
+          <span className="row-copy">
+            <strong>{t.title}</strong>
+            <small>
+              {deadlineText(t.deadline)} · {stateText[t.state]}
+            </small>
+          </span>
+          <Icon name="arrow" />
+        </button>
+        {!["closed", "cancelled"].includes(t.state) && (
+          <button
+            className="text-button choose-task"
+            disabled={busy}
+            aria-label={`${t.title}を今日の課題にする`}
+            onClick={() =>
+              void perform(async () => {
+                await api("/select", { id: t.id });
+                await refresh();
+                navigate("home");
+              })
+            }
+          >
+            今日はこれをする
+          </button>
+        )}
+      </div>
     );
   }
   if (loading)
     return (
-      <main>
-        <p>保存した情報を読み込んでいます…</p>
+      <main className="loading" aria-label="課題を読み込み中" aria-busy="true">
+        <div className="skeleton title-skeleton" />
+        <div className="skeleton card-skeleton" />
       </main>
     );
-  return (
-    <>
-      <header>
-        <a href="/" className="brand">
-          <span aria-hidden>↗</span> task-control
-        </a>
-        {logged && (
-          <button
-            className="quiet"
-            onClick={() =>
-              void run(async () => {
-                await api("/logout", {});
-                setLogged(false);
-                setTasks([]);
-                setDetail(null);
-                setHome({});
-              })
-            }
-          >
-            ログアウト
-          </button>
-        )}
-      </header>
-      <main>
-        <div aria-live="polite">
+  if (!logged)
+    return (
+      <main className="login">
+        <div className="app-icon">
+          <Icon name="arrow" />
+        </div>
+        <p className="eyebrow">TASK CONTROL</p>
+        <h1>課題を、ひとつずつ。</h1>
+        <p className="muted">
+          何をするか迷ったら、ここから。
+          <br />
+          中断した続きも、すぐに見つかります。
+        </p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const password = new FormData(e.currentTarget).get("password");
+            void perform(async () => {
+              await api("/login", { password });
+              await refresh();
+            });
+          }}
+        >
+          <label>
+            パスワード
+            <input
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              required
+            />
+          </label>
           {error && (
-            <p role="alert" className="error">
+            <p className="error" role="alert">
               {error}
             </p>
           )}
-          {notice && <p className="notice">{notice}</p>}
+          <button className="primary wide" disabled={busy}>
+            {busy ? "ログインしています…" : "ログイン"}
+          </button>
+        </form>
+      </main>
+    );
+  return (
+    <div className="app-layout">
+      <a href="#main" className="skip-link">
+        本文へ移動
+      </a>
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="app-icon small">
+            <Icon name="arrow" />
+          </span>
+          <span>task-control</span>
         </div>
-        {!logged ? (
-          <section className="login">
-            <div className="eyebrow">自分のペースで、ここから</div>
-            <h1>今の一手へ。</h1>
-            <p>期限を確かめる。少し始める。続きに戻る。</p>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const password = new FormData(e.currentTarget).get("password");
-                void run(async () => {
-                  await api("/login", { password });
-                  await refresh();
-                });
+        <nav aria-label="メインナビゲーション">
+          {tabs.map((tab) => (
+            <button
+              key={tab.view}
+              aria-current={view === tab.view ? "page" : undefined}
+              className={view === tab.view ? "current" : ""}
+              disabled={busy}
+              onClick={() => {
+                navigate(tab.view);
+                void perform(refresh);
               }}
             >
-              <label>
-                パスワード
-                <input
-                  name="password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                />
-              </label>
-              <button disabled={busy}>ログイン</button>
-            </form>
-          </section>
-        ) : (
-          <>
-            {view === "home" && (
-              <>
-                <div className="page-heading">
-                  <div>
-                    <p className="eyebrow">一度に、ひとつで大丈夫</p>
-                    <h1>今の一手</h1>
-                  </div>
-                  <button className="quiet" onClick={() => navigate("inbox")}>
-                    ＋ 案内を登録
-                  </button>
-                </div>
-                {t ? (
-                  ActionCard({ task: t, reason: home.reason })
-                ) : (
-                  <section className="action-card">
-                    <h2>
-                      {tasks.some(
-                        (t) => !["closed", "cancelled"].includes(t.state),
-                      )
-                        ? "予定した時間までひと休み"
-                        : "案内をひとつ、ここに。"}
-                    </h2>
-                    <p>タイトルだけでも保存できます。整理はあとから。</p>
-                    <button
-                      onClick={() => navigate(tasks.length ? "list" : "inbox")}
-                    >
-                      {tasks.length ? "別の作業を選ぶ" : "最初の案内を登録"}
-                    </button>
-                  </section>
-                )}
-                <section className="attention">
-                  <h3>期限と確認しておきたいこと</h3>
-                  <p className="muted">
-                    ここにあるのは、登録した情報だけです。
+              <Icon name={tab.icon} />
+              <span>{tab.label}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-bottom">
+          <button className="text-button" onClick={() => setGuide(true)}>
+            <Icon name="help" />
+            使い方
+          </button>
+          <span className="caption">少しずつ、進めていこう。</span>
+        </div>
+      </aside>
+      <div className="content-shell">
+        <header className="topbar">
+          <span className="mobile-brand">task-control</span>
+          <span className="desktop-context">自分のペースで、ひとつずつ。</span>
+          <button
+            className="text-button"
+            aria-label="使い方を見る"
+            onClick={() => setGuide(true)}
+          >
+            <Icon name="help" />
+            <span>使い方</span>
+          </button>
+        </header>
+        <main id="main" className="content">
+          <div aria-live="polite">
+            {!modal && error && (
+              <p role="alert" className="error">
+                {error}
+              </p>
+            )}
+            {notice && <p className="notice">{notice}</p>}
+          </div>
+          {view === "home" && (
+            <>
+              <div className="page-title">
+                <div>
+                  <p className="eyebrow">
+                    {DateTime.now()
+                      .setZone(zone)
+                      .setLocale("ja")
+                      .toFormat("M月d日 cccc")}
                   </p>
-                  {home.attention?.slice(0, 3).map((x: Task) => (
+                  <h1 ref={heading} tabIndex={-1}>
+                    今日すること
+                  </h1>
+                  <p className="muted">
+                    まずは、ひとつ。続きからでも大丈夫です。
+                  </p>
+                </div>
+                <button
+                  className="primary compact desktop-add"
+                  onClick={() => navigate("inbox")}
+                >
+                  <Icon name="add" />
+                  課題を追加
+                </button>
+              </div>
+              <div className="home-grid">
+                <div>
+                  {task ? (
+                    card(task, home.reason)
+                  ) : (
+                    <section className="focus-card empty-state">
+                      <div className="empty-symbol">
+                        <Icon name={activeTasks.length ? "today" : "add"} />
+                      </div>
+                      <h2>
+                        {activeTasks.length
+                          ? "予定の時間まで、ひと休み。"
+                          : "最初の課題を追加しましょう。"}
+                      </h2>
+                      <p className="muted">
+                        {activeTasks.length
+                          ? "今始めたければ、課題一覧から選べます。"
+                          : "課題の名前か、届いた案内を入れるだけ。締切や細かい設定は、あとからで大丈夫です。"}
+                      </p>
+                      <button
+                        className="primary"
+                        onClick={() =>
+                          navigate(activeTasks.length ? "list" : "inbox")
+                        }
+                      >
+                        {activeTasks.length ? "課題を選ぶ" : "課題を追加"}
+                        <Icon name={activeTasks.length ? "tasks" : "add"} />
+                      </button>
+                    </section>
+                  )}
+                  {task && (
                     <button
-                      className="list-row"
-                      key={x.id}
-                      onClick={() => void run(() => open(x))}
+                      className="text-button alternate"
+                      onClick={() => navigate("list")}
                     >
-                      <span>{x.title}</span>
-                      <small>{deadlineLabel(x.deadline)}</small>
-                    </button>
-                  ))}
-                  {home.attention?.length > 3 && (
-                    <button className="quiet" onClick={() => navigate("list")}>
-                      ほかの期限・未確認事項を見る
+                      別の課題を選ぶ
+                      <Icon name="arrow" />
                     </button>
                   )}
-                  <button className="quiet" onClick={() => navigate("list")}>
-                    別の作業を選ぶ →
-                  </button>
-                </section>
-                <section className="weekly">
-                  <h3>週に一度、登録漏れを照合</h3>
-                  <p>大学の課題一覧を開き、このアプリと見比べます。</p>
+                </div>
+                <aside className="home-aside">
+                  <section className="panel deadlines">
+                    <div className="section-title">
+                      <h2>締切を見ておく</h2>
+                      <Icon name="calendar" />
+                    </div>
+                    <p className="caption">
+                      近い締切や、まだ入力していないもの。
+                    </p>
+                    {home.attention?.length ? (
+                      home.attention.slice(0, 3).map((t: Task) => (
+                        <button
+                          className="deadline-row"
+                          key={t.id}
+                          onClick={() => {
+                            void perform(async () => {
+                              await open(t);
+                              show("deadline", t);
+                            });
+                          }}
+                        >
+                          <strong>{t.title}</strong>
+                          <span>{deadlineText(t.deadline)}</span>
+                        </button>
+                      ))
+                    ) : (
+                      <p className="muted">今、近い締切はありません。</p>
+                    )}
+                    {home.attention?.length > 3 && (
+                      <button
+                        className="text-button"
+                        onClick={() => navigate("list")}
+                      >
+                        すべての課題を見る
+                      </button>
+                    )}
+                  </section>
+                  <details className="weekly panel">
+                    <summary>登録し忘れがないか見直す</summary>
+                    <p className="muted">
+                      週に一度、大学の課題一覧と見比べてみましょう。このアプリに入れていない課題は、ここには表示されません。
+                    </p>
+                    <p className="caption">
+                      {home.weeklyCheckedAt
+                        ? `前回見比べた日：${formatTime(home.weeklyCheckedAt, zone)}`
+                        : "まだ見直した記録はありません。"}
+                    </p>
+                    <button
+                      className="secondary wide"
+                      disabled={busy}
+                      onClick={() =>
+                        void perform(async () => {
+                          await api("/weekly-check", {});
+                          await refresh();
+                          setNotice("課題一覧を見直した日を保存しました。");
+                        })
+                      }
+                    >
+                      大学の一覧と見比べた
+                    </button>
+                    <button
+                      className="text-button"
+                      onClick={() => navigate("settings")}
+                    >
+                      見直す時間を設定
+                    </button>
+                  </details>
+                </aside>
+              </div>
+            </>
+          )}
+          {view === "inbox" && (
+            <>
+              <div className="page-title">
+                <div>
+                  <p className="eyebrow">覚えておく場所を、ここに。</p>
+                  <h1 ref={heading} tabIndex={-1}>
+                    課題を追加
+                  </h1>
                   <p className="muted">
-                    {home.weeklyCheckedAt
-                      ? `本人が照合を記録：${formatTime(home.weeklyCheckedAt, settings.preferences.zone)}`
-                      : "まだ照合の記録はありません。"}{" "}
-                    {home.weeklyTime
-                      ? "設定した曜日・時刻に確認します。"
-                      : "確認時刻は設定から選べます。"}
+                    名前だけで保存できます。まだ決まっていないことは、あとで。
                   </p>
-                  <button
-                    className="secondary"
-                    disabled={busy}
-                    onClick={() =>
-                      void run(async () => {
-                        await api("/weekly-check", {});
-                        await refresh();
-                        setNotice(
-                          "本人による照合を記録しました。大学サイトをシステムが確認した記録ではありません。",
-                        );
-                      })
-                    }
-                  >
-                    大学の一覧と照合した
-                  </button>
-                </section>
-              </>
-            )}
-            {view === "inbox" && (
-              <>
-                <p className="eyebrow">まずは受け取るだけ</p>
-                <h1>登録・受信箱</h1>
+                </div>
+              </div>
+              <div className="narrow">
                 <form
-                  className="panel"
+                  className="panel add-form"
                   onSubmit={(e) => {
                     e.preventDefault();
-                    const form = e.currentTarget;
-                    const f = new FormData(form);
-                    void run(async () => {
-                      const added = await api("/tasks", {
+                    const f = new FormData(e.currentTarget);
+                    void perform(async () => {
+                      const t = await api("/tasks", {
                         title: f.get("title"),
                         original: f.get("original"),
                         sourceUrl: f.get("sourceUrl"),
                       });
                       await refresh();
-                      await open(added);
+                      await open(t);
+                      setNotice(
+                        "追加しました。締切を入れても、そのまま始めても大丈夫です。",
+                      );
                     });
                   }}
                 >
                   <label>
-                    案内文
-                    <textarea
-                      name="original"
-                      rows={6}
-                      placeholder="案内をそのまま貼り付ける。あとで根拠を確認できます。"
-                    />
-                  </label>
-                  <label>
-                    タイトルだけでもOK
+                    課題の名前
                     <input
                       name="title"
                       maxLength={200}
-                      placeholder="例：演習のレポート"
+                      placeholder="例：英語のレポート"
+                      autoComplete="off"
                     />
                   </label>
+                  <label>
+                    届いた案内（任意）
+                    <textarea
+                      name="original"
+                      rows={5}
+                      placeholder="先生からのメールや、課題ページの文章を貼り付ける"
+                    />
+                  </label>
+                  <p className="hint">
+                    案内だけを貼り付けても保存できます。書かれている締切は、あとで一緒に見られます。
+                  </p>
                   <details>
-                    <summary>出典のリンクを追加（任意）</summary>
+                    <summary>案内のリンクも残す</summary>
                     <label>
-                      出典URL
+                      案内のURL
                       <input
                         name="sourceUrl"
                         type="url"
@@ -511,817 +669,750 @@ function App() {
                       />
                     </label>
                   </details>
-                  <button disabled={busy}>受信箱に保存</button>
-                  <p className="muted">
-                    原文の解析はまずアプリ内で行います。期限は確認するまで候補です。
-                  </p>
-                </form>
-                <h2>期限の確認を待っているもの</h2>
-                {tasks
-                  .filter(
-                    (x) =>
-                      !x.deadline.confirmed &&
-                      !["closed", "cancelled"].includes(x.state),
-                  )
-                  .map((x) => (
-                    <button
-                      className="list-row"
-                      key={x.id}
-                      onClick={() => void run(() => open(x))}
-                    >
-                      {x.title}
-                      <small>{x.deadline.uncertainty.join("・")}</small>
-                    </button>
-                  ))}
-              </>
-            )}
-            {view === "list" && (
-              <>
-                <p className="eyebrow">見渡したいときに</p>
-                <h1>一覧・期限確認</h1>
-                <p className="muted">
-                  日付のみの期限には、締切時刻を補っていません。
-                </p>
-                {tasks.length === 0 && <p>まだ登録がありません。</p>}
-                {tasks.map((x) => (
-                  <section className="task-row" key={x.id}>
-                    <button
-                      className="list-row"
-                      onClick={() => void run(() => open(x))}
-                    >
-                      <strong>{x.title}</strong>
-                      <small>{deadlineLabel(x.deadline)}</small>
-                      <small>
-                        {states[x.state]}
-                        {x.submittedAt ? "・提出は本人確認済み" : ""}
-                      </small>
-                    </button>
-                    {!["closed", "cancelled"].includes(x.state) && (
-                      <button
-                        className="quiet"
-                        disabled={busy}
-                        onClick={() =>
-                          void run(async () => {
-                            await api("/select", { id: x.id });
-                            await refresh();
-                            setView("home");
-                          })
-                        }
-                      >
-                        今はこれをする →
-                      </button>
-                    )}
-                  </section>
-                ))}
-              </>
-            )}
-            {view === "detail" && t && (
-              <>
-                <p className="eyebrow">作業の続きと、期限の根拠</p>
-                <h1>{t.title}</h1>
-                <p className="muted">
-                  {states[t.state]}
-                  {t.submittedAt
-                    ? ` ／ 提出は本人の申告（${formatTime(t.submittedAt, settings.preferences.zone)}）`
-                    : ""}
-                </p>
-                {!["closed", "cancelled"].includes(t.state) &&
-                  ActionCard({ task: t })}
-                <section className="panel">
-                  <h2>中断・終了を記録する</h2>
-                  {!["closed", "cancelled"].includes(t.state) && (
-                    <>
-                      <form
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          const memo = new FormData(e.currentTarget).get(
-                            "memo",
-                          );
-                          void run(() => action(t, "pause", { memo }));
-                        }}
-                      >
-                        <label>
-                          再開メモ（任意）
-                          <textarea
-                            name="memo"
-                            key={`${t.id}-${t.resume}`}
-                            defaultValue={t.resume}
-                            placeholder={`次は「${t.next}」。終了条件：${t.stepDone}`}
-                            rows={2}
-                          />
-                        </label>
-                        <button className="secondary" disabled={busy}>
-                          この地点で中断する
-                        </button>
-                      </form>
-                      <div className="actions">
-                        <button
-                          className="secondary"
-                          disabled={busy}
-                          onClick={() => void run(() => action(t, "step_done"))}
-                        >
-                          今回の一手が終わった
-                        </button>
-                        <button
-                          className="secondary"
-                          disabled={busy || t.state === "work_done"}
-                          onClick={() => void run(() => action(t, "work_done"))}
-                        >
-                          作業全体が終わった
-                        </button>
-                      </div>
-                    </>
-                  )}
-                  {t.state === "work_done" && (
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        void run(() => action(t, "submit", { ack: true }));
-                      }}
-                    >
-                      <label className="check">
-                        <input type="checkbox" required />
-                        提出完了画面などで、提出済みであることを自分で確認した
-                      </label>
-                      <button disabled={busy}>本人による提出確認を記録</button>
-                    </form>
-                  )}
-                  <details>
-                    <summary>誤操作の修正・取りやめ</summary>
-                    <button
-                      className="secondary"
-                      disabled={busy}
-                      onClick={() => void run(() => action(t, "reopen"))}
-                    >
-                      完了・提出確認を取り消して再開
-                    </button>
-                    {!["closed", "cancelled"].includes(t.state) && (
-                      <button
-                        className="quiet"
-                        onClick={() => {
-                          if (
-                            window.confirm(
-                              "このタスクを取りやめますか？ 必須提出物かどうかは自分で確認してください。",
-                            )
-                          )
-                            void run(() => action(t, "cancel", { ack: true }));
-                        }}
-                      >
-                        自分の判断で取りやめる
-                      </button>
-                    )}
-                  </details>
-                </section>
-                <section className="panel">
-                  <h2>期限の根拠を確認</h2>
-                  <blockquote>
-                    {t.original || "案内原文はまだありません。"}
-                  </blockquote>
-                  {t.sourceUrl && (
-                    <a
-                      href={t.sourceUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      出典を開く ↗
-                    </a>
-                  )}
-                  <p>{deadlineLabel(t.deadline)}</p>
-                  {t.deadline.uncertainty.map((s) => (
-                    <p className="muted" key={s}>
-                      {s}
-                    </p>
-                  ))}
-                  <DeadlineForm
-                    key={`${t.id}-${t.revision}`}
-                    task={t}
-                    busy={busy}
-                    save={(d) =>
-                      run(async () => {
-                        await api(`/tasks/${t.id}/deadline`, {
-                          revision: t.revision,
-                          deadline: d,
-                          ack: true,
-                        });
-                        await refresh();
-                        setNotice("期限の変更前後と確認日時を記録しました。");
-                      })
-                    }
-                  />
-                </section>
-                <section className="panel">
-                  <h2>作業の入口を整える</h2>
-                  <form
-                    key={`${t.id}-${t.revision}`}
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      const f = new FormData(e.currentTarget);
-                      void run(async () => {
-                        await api(`/tasks/${t.id}/edit`, {
-                          revision: t.revision,
-                          fields: {
-                            title: f.get("title"),
-                            workUrl: f.get("workUrl"),
-                            sourceUrl: f.get("sourceUrl"),
-                            next: f.get("next"),
-                            stepDone: f.get("stepDone"),
-                            totalDone: f.get("totalDone"),
-                            importance: f.get("importance"),
-                            estimate: f.get("estimate")
-                              ? Number(f.get("estimate"))
-                              : null,
-                            needsSubmission: f.has("needsSubmission"),
-                          },
-                        });
-                        await refresh();
-                        setNotice("作業情報を保存しました");
-                      });
-                    }}
-                  >
-                    <label>
-                      タイトル
-                      <input name="title" defaultValue={t.title} required />
-                    </label>
-                    <label>
-                      作業ページURL
-                      <input
-                        name="workUrl"
-                        type="url"
-                        defaultValue={t.workUrl}
-                      />
-                    </label>
-                    <label>
-                      次の一手
-                      <input name="next" defaultValue={t.next} />
-                    </label>
-                    <label>
-                      今回の終了条件
-                      <input name="stepDone" defaultValue={t.stepDone} />
-                    </label>
-                    <label>
-                      作業全体の完了条件
-                      <input name="totalDone" defaultValue={t.totalDone} />
-                    </label>
-                    <details>
-                      <summary>任意の補足</summary>
-                      <label>
-                        出典URL
-                        <input
-                          name="sourceUrl"
-                          type="url"
-                          defaultValue={t.sourceUrl}
-                        />
-                      </label>
-                      <label>
-                        重要度
-                        <select name="importance" defaultValue={t.importance}>
-                          <option value="normal">通常</option>
-                          <option value="high">重要</option>
-                        </select>
-                      </label>
-                      <label>
-                        今回の目安時間（分・空欄は不明）
-                        <input
-                          name="estimate"
-                          type="number"
-                          min="1"
-                          max="10000"
-                          defaultValue={t.estimate ?? ""}
-                        />
-                      </label>
-                      <label className="check">
-                        <input
-                          type="checkbox"
-                          name="needsSubmission"
-                          defaultChecked={t.needsSubmission}
-                        />
-                        提出が必要
-                      </label>
-                    </details>
-                    <button disabled={busy}>作業情報を保存</button>
-                  </form>
-                  <button
-                    className="quiet"
-                    disabled={busy}
-                    onClick={() =>
-                      void run(async () => {
-                        setSuggestion(await api(`/tasks/${t.id}/suggest`, {}));
-                      })
-                    }
-                  >
-                    次の一手の候補を出す
-                    {settings.preferences.aiEnabled
-                      ? "（外部AIへ送信）"
-                      : "（テンプレート）"}
+                  <button className="primary wide" disabled={busy}>
+                    {busy ? "保存しています…" : "課題を保存"}
+                    <Icon name="add" />
                   </button>
-                  {suggestion && (
-                    <div className="resume">
+                </form>
+                <p className="caption center">
+                  分類や優先順位を、いま決める必要はありません。
+                </p>
+              </div>
+            </>
+          )}
+          {view === "list" && (
+            <>
+              <div className="page-title">
+                <div>
+                  <p className="eyebrow">取り組むことを、見渡す。</p>
+                  <h1 ref={heading} tabIndex={-1}>
+                    課題
+                  </h1>
+                </div>
+                <button
+                  className="primary compact"
+                  onClick={() => navigate("inbox")}
+                >
+                  <Icon name="add" />
+                  追加
+                </button>
+              </div>
+              <div className="segments" aria-label="課題の表示">
+                {[
+                  ["open", "これから・途中"],
+                  ["closed", "終わった課題"],
+                ].map(([value, label]) => (
+                  <button
+                    key={value}
+                    aria-pressed={filter === value}
+                    onClick={() => setFilter(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <section className="panel task-list">
+                {tasks
+                  .filter((t) =>
+                    filter === "open"
+                      ? !["closed", "cancelled"].includes(t.state)
+                      : ["closed", "cancelled"].includes(t.state),
+                  )
+                  .map(taskRow)}
+                {!tasks.some((t) =>
+                  filter === "open"
+                    ? !["closed", "cancelled"].includes(t.state)
+                    : ["closed", "cancelled"].includes(t.state),
+                ) && (
+                  <div className="empty-state">
+                    <Icon name="tasks" />
+                    <h2>
+                      {filter === "open"
+                        ? "ここに課題が並びます。"
+                        : "終わった課題は、ここに。"}
+                    </h2>
+                    <p className="muted">
+                      {filter === "open"
+                        ? "課題の名前だけでも追加できます。"
+                        : "作業や提出が済んだ課題を、あとから見返せます。"}
+                    </p>
+                    {filter === "open" && (
+                      <button
+                        className="primary"
+                        onClick={() => navigate("inbox")}
+                      >
+                        課題を追加
+                      </button>
+                    )}
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+          {view === "detail" && task && (
+            <>
+              <button
+                className="text-button back"
+                onClick={() => navigate("list")}
+              >
+                <Icon name="back" />
+                課題一覧
+              </button>
+              <div className="page-title">
+                <div>
+                  <p className="eyebrow">{stateText[task.state]}</p>
+                  <h1 ref={heading} tabIndex={-1}>
+                    {task.title}
+                  </h1>
+                </div>
+                <button
+                  className="secondary compact"
+                  onClick={() => show("edit", task)}
+                >
+                  編集
+                </button>
+              </div>
+              <ol className="progress-steps" aria-label="課題の進み方">
+                {(task.needsSubmission
+                  ? ["取り組む", "提出する", "完了"]
+                  : ["取り組む", "完了"]
+                ).map((label, i, arr) => (
+                  <li
+                    key={label}
+                    aria-current={
+                      task.state === "closed"
+                        ? i === arr.length - 1
+                          ? "step"
+                          : undefined
+                        : task.state === "work_done"
+                          ? i === 1
+                            ? "step"
+                            : undefined
+                          : i === 0
+                            ? "step"
+                            : undefined
+                    }
+                  >
+                    <span>{i + 1}</span>
+                    {label}
+                  </li>
+                ))}
+              </ol>
+              <div className="detail-grid">
+                <div>
+                  {["closed", "cancelled"].includes(task.state) ? (
+                    <section className="focus-card complete-card">
+                      <div className="empty-symbol">
+                        <Icon name="check" />
+                      </div>
+                      <h2>
+                        {task.state === "cancelled"
+                          ? "この課題は取りやめました。"
+                          : "おつかれさまでした。"}
+                      </h2>
                       <p>
-                        {suggestion.source === "ai"
-                          ? "AIの候補（未採用）"
-                          : "テンプレートの候補"}
+                        {task.submittedAt
+                          ? `提出したことを確認した日：${formatTime(task.submittedAt, zone)}`
+                          : task.state === "closed"
+                            ? "作業が終わったことを保存しました。"
+                            : "必要になったら、また再開できます。"}
                       </p>
-                      <p>{suggestion.notice}</p>
-                      <p>{suggestion.next}</p>
-                      <p>終了条件：{suggestion.stepDone}</p>
-                      <p>{suggestion.evidence}</p>
                       <button
                         className="secondary"
                         disabled={busy}
                         onClick={() =>
-                          void run(async () => {
-                            await api(`/tasks/${t.id}/edit`, {
-                              revision: t.revision,
-                              fields: {
-                                next: suggestion.next,
-                                stepDone: suggestion.stepDone,
-                              },
-                            });
-                            await refresh();
-                            setSuggestion(null);
+                          void perform(async () => {
+                            await mutate(task, "reopen");
+                            setNotice("もう一度取り組めるようにしました。");
                           })
                         }
                       >
-                        この一手を採用する
+                        完了を取り消して再開する
                       </button>
+                    </section>
+                  ) : (
+                    <section className="focus-card">
+                      <div className="card-top">
+                        <span className="pill">{stateText[task.state]}</span>
+                        {task.planAt && (
+                          <span className="caption">
+                            予定：{formatTime(task.planAt, zone)}
+                          </span>
+                        )}
+                      </div>
+                      <h2>
+                        {task.state === "work_done"
+                          ? "あとは、提出。"
+                          : task.state === "active"
+                            ? "自分のペースで進めましょう。"
+                            : task.resume
+                              ? "前回の続きから。"
+                              : "まず、これから。"}
+                      </h2>
+                      {task.state === "work_done" ? (
+                        <>
+                          <p className="muted">
+                            作業の終了は保存しました。提出ページで送信できたことを確認したら、下のボタンで完了にできます。
+                          </p>
+                          {(task.workUrl || task.sourceUrl) && (
+                            <a
+                              className="work-link"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              href={task.workUrl || task.sourceUrl}
+                            >
+                              <Icon name="link" />
+                              提出ページを開く
+                            </a>
+                          )}
+                          <button
+                            className="primary wide"
+                            disabled={busy}
+                            onClick={() => show("submit", task)}
+                          >
+                            提出済みにする
+                            <Icon name="check" />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <div className="note">
+                            <span>
+                              {task.resume ? "続きのメモ" : "最初にすること"}
+                            </span>
+                            <p>{task.resume || nextText(task)}</p>
+                          </div>
+                          {!task.resume && (
+                            <p className="muted">{stepText(task)}</p>
+                          )}
+                          {task.workUrl || task.sourceUrl ? (
+                            <a
+                              className="work-link"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              href={task.workUrl || task.sourceUrl}
+                            >
+                              <Icon name="link" />
+                              作業ページを開く
+                            </a>
+                          ) : (
+                            <button
+                              className="text-button"
+                              onClick={() => show("edit", task)}
+                            >
+                              <Icon name="link" />
+                              作業ページのリンクを追加
+                            </button>
+                          )}
+                          <div className="actions">
+                            {task.state === "active" ? (
+                              <>
+                                <button
+                                  className="secondary grow"
+                                  disabled={busy}
+                                  onClick={() => show("pause", task)}
+                                >
+                                  <Icon name="pause" />
+                                  途中で休む
+                                </button>
+                                <button
+                                  className="primary grow"
+                                  disabled={busy}
+                                  onClick={() => show("finish", task)}
+                                >
+                                  作業が終わった
+                                  <Icon name="check" />
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  className="primary grow"
+                                  disabled={busy}
+                                  onClick={() => begin(task)}
+                                >
+                                  {task.state === "paused"
+                                    ? "続きからはじめる"
+                                    : "はじめる"}
+                                  <Icon name="arrow" />
+                                </button>
+                                <button
+                                  className="secondary"
+                                  onClick={() => show("smaller", task)}
+                                >
+                                  始めにくい
+                                </button>
+                              </>
+                            )}
+                          </div>
+                          <details className="other-actions">
+                            <summary>ほかの操作</summary>
+                            <div className="stack">
+                              <button
+                                className="text-button"
+                                onClick={() => show("plan", task)}
+                              >
+                                あとで取り組む時間を決める
+                              </button>
+                              <button
+                                className="text-button"
+                                disabled={busy}
+                                onClick={() =>
+                                  void perform(async () => {
+                                    await mutate(task, "step_done");
+                                    setNotice(
+                                      "ひと区切りを保存しました。残りの作業は続けられます。",
+                                    );
+                                  })
+                                }
+                              >
+                                ひと区切りだけ終わった
+                              </button>
+                              {task.state !== "active" && (
+                                <button
+                                  className="text-button"
+                                  onClick={() => show("finish", task)}
+                                >
+                                  すでに作業は終わっている
+                                </button>
+                              )}
+                              <button
+                                className="text-button"
+                                onClick={() => show("edit", task)}
+                              >
+                                最初にすることを書き換える
+                              </button>
+                            </div>
+                          </details>
+                        </>
+                      )}
+                    </section>
+                  )}
+                  <details className="panel">
+                    <summary>先生からの案内</summary>
+                    <blockquote>
+                      {task.original ||
+                        "案内の文章は、まだ貼り付けていません。"}
+                    </blockquote>
+                    {task.sourceUrl && (
+                      <a
+                        href={task.sourceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        案内のページを開く
+                        <Icon name="link" />
+                      </a>
+                    )}
+                  </details>
+                </div>
+                <aside className="detail-aside">
+                  <section className="panel">
+                    <div className="section-title">
+                      <h2>締切</h2>
+                      <Icon name="calendar" />
                     </div>
-                  )}
-                </section>
-                <section className="panel">
-                  <h2>通知・同期・履歴</h2>
-                  <p>
-                    カレンダー：
-                    {detail.sync?.status === "synced"
-                      ? "同期済み"
-                      : detail.sync?.status === "failed"
-                        ? "失敗・古い期限が外部に残る可能性あり"
-                        : "未同期"}
-                  </p>
-                  {detail.sync?.error && (
-                    <p className="error">{detail.sync.error}</p>
-                  )}
-                  {detail.jobs.map((j: any, i: number) => (
-                    <p key={i}>
-                      {jobStates[j.status]} ·{" "}
-                      {formatTime(j.due, settings.preferences.zone)}
+                    <p className="deadline-value">
+                      {deadlineText(task.deadline)}
                     </p>
-                  ))}
-                  <details>
-                    <summary>変更履歴を見る</summary>
+                    {!task.deadline.confirmed && (
+                      <p className="caption">
+                        分かったときに入力できます。先に作業を始めても大丈夫です。
+                      </p>
+                    )}
+                    <button
+                      className="secondary wide"
+                      onClick={() => show("deadline", task)}
+                    >
+                      {task.deadline.confirmed ? "締切を変更" : "締切を入力"}
+                    </button>
+                  </section>
+                  <details className="panel">
+                    <summary>作業や変更の記録</summary>
+                    {task.submittedAt && (
+                      <p className="caption">
+                        提出の記録は、自分で提出先を確認して保存したものです。
+                      </p>
+                    )}
                     {detail.history.map((h: any, i: number) => (
                       <div className="history" key={i}>
-                        <p>
-                          {h.kind} ·{" "}
-                          {formatTime(h.at, settings.preferences.zone)}
-                        </p>
+                        <strong>{historyText[h.kind] || h.kind}</strong>
+                        <small>{formatTime(h.at, zone)}</small>
                         {h.kind === "deadline_confirmed" && (
                           <p>
-                            {deadlineLabel(JSON.parse(h.before_data).deadline)}{" "}
-                            → {deadlineLabel(JSON.parse(h.after_data).deadline)}
+                            {deadlineText(JSON.parse(h.before_data).deadline)} →{" "}
+                            {deadlineText(JSON.parse(h.after_data).deadline)}
                           </p>
                         )}
                       </div>
                     ))}
                   </details>
-                </section>
-              </>
-            )}
-            {view === "settings" && settings && (
-              <>
-                <p className="eyebrow">必要なものだけ、つなぐ</p>
-                <h1>設定・連携状態</h1>
+                  <details className="panel">
+                    <summary>通知とカレンダー</summary>
+                    <p>
+                      カレンダー：
+                      {detail.sync?.status === "synced"
+                        ? "同期済み"
+                        : detail.sync?.status === "failed"
+                          ? "同期できませんでした"
+                          : "まだ同期していません"}
+                    </p>
+                    {detail.sync?.error && (
+                      <p className="error">{detail.sync.error}</p>
+                    )}
+                    {detail.jobs.map((j: any, i: number) => (
+                      <p key={i}>
+                        {jobStates[j.status]} · {formatTime(j.due, zone)}
+                      </p>
+                    ))}
+                  </details>
+                  {!["closed", "cancelled"].includes(task.state) && (
+                    <button
+                      className="text-button destructive"
+                      onClick={() => show("cancel", task)}
+                    >
+                      この課題を取りやめる
+                    </button>
+                  )}
+                </aside>
+              </div>
+            </>
+          )}
+          {view === "settings" && settings && (
+            <>
+              <div className="page-title">
+                <div>
+                  <p className="eyebrow">必要なものだけ、自分に合わせる。</p>
+                  <h1 ref={heading} tabIndex={-1}>
+                    設定
+                  </h1>
+                </div>
+              </div>
+              <div className="narrow">
+                <button
+                  className="settings-help panel"
+                  onClick={() => setGuide(true)}
+                >
+                  <Icon name="help" />
+                  <span>
+                    <strong>使い方をもう一度見る</strong>
+                    <small>追加・開始・休憩・提出の流れ</small>
+                  </span>
+                  <Icon name="arrow" />
+                </button>
                 <Settings
                   data={settings}
                   busy={busy}
-                  run={run}
+                  run={async (fn) => {
+                    await perform(async () => {
+                      await fn();
+                      setNotice("設定を保存しました。");
+                    });
+                  }}
                   refresh={refresh}
                 />
-              </>
-            )}
-          </>
-        )}
-      </main>
-      {logged && (
-        <nav aria-label="メインナビゲーション">
-          {[
-            ["home", "今の一手"],
-            ["inbox", "登録"],
-            ["list", "一覧・期限"],
-            ["settings", "設定"],
-          ].map(([v, label]) => (
-            <button
-              key={v}
-              className={view === v ? "current" : ""}
-              onClick={() => navigate(v as View)}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
-      )}
-      <footer>期限を確かめて、ひとつずつ。</footer>
-    </>
-  );
-}
-function DeadlineForm({
-  task,
-  busy,
-  save,
-}: {
-  task: Task;
-  busy: boolean;
-  save: (d: unknown) => Promise<void>;
-}) {
-  const [kind, setKind] = useState(task.deadline.kind);
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        const f = new FormData(e.currentTarget);
-        void save({
-          kind,
-          date: ["date", "datetime"].includes(kind) ? f.get("date") : null,
-          time: kind === "datetime" ? f.get("time") : null,
-          zone: kind === "datetime" ? f.get("zone") : null,
-          confirmed: kind !== "unknown",
-          evidence: f.get("evidence"),
-          uncertainty:
-            kind === "date"
-              ? ["提出時刻を確認する"]
-              : kind === "unknown"
-                ? ["提出期限の根拠を確認する"]
-                : [],
-        });
-      }}
-    >
-      <label>
-        確認できた範囲
-        <select
-          value={kind}
-          onChange={(e) => setKind(e.target.value as typeof kind)}
-        >
-          <option value="unknown">まだ分からない</option>
-          <option value="none">期限なしと明示されている</option>
-          <option value="date">年月日まで分かる（時刻未確認）</option>
-          <option value="datetime">年月日・時刻・タイムゾーンまで分かる</option>
-        </select>
-      </label>
-      {["date", "datetime"].includes(kind) && (
-        <label>
-          提出日（年も確認）
-          <input
-            name="date"
-            type="date"
-            defaultValue={task.deadline.date ?? ""}
-            required
-          />
-        </label>
-      )}
-      {kind === "datetime" && (
-        <>
-          <label>
-            提出時刻
-            <input
-              name="time"
-              type="time"
-              defaultValue={task.deadline.time ?? ""}
-              required
-            />
-          </label>
-          <label>
-            根拠を確認したタイムゾーン
-            <input
-              name="zone"
-              placeholder="例：Asia/Tokyo"
-              defaultValue={task.deadline.zone ?? ""}
-              required
-            />
-          </label>
-        </>
-      )}
-      <label>
-        根拠の原文・確認内容
-        <textarea
-          name="evidence"
-          defaultValue={task.deadline.evidence}
-          required={kind !== "unknown"}
-          rows={2}
+                <button
+                  className="text-button destructive"
+                  disabled={busy}
+                  onClick={() =>
+                    void perform(async () => {
+                      await api("/logout", {});
+                      setLogged(false);
+                      setTasks([]);
+                      setHome({});
+                      setDetail(null);
+                      detailId.current = null;
+                    })
+                  }
+                >
+                  ログアウト
+                </button>
+              </div>
+            </>
+          )}
+        </main>
+      </div>
+      {guide && (
+        <Guide
+          close={closeGuide}
+          add={() => {
+            closeGuide();
+            navigate("inbox");
+          }}
         />
-      </label>
-      <label className="check">
-        <input type="checkbox" required />
-        根拠を確認し、提出期限の情報を明示的に変更する
-      </label>
-      <button disabled={busy}>期限の確認・変更を保存</button>
-    </form>
-  );
-}
-function Settings({
-  data,
-  busy,
-  run,
-  refresh,
-}: {
-  data: any;
-  busy: boolean;
-  run: (fn: () => Promise<void>) => Promise<void>;
-  refresh: () => Promise<void>;
-}) {
-  const [ai, setAi] = useState(data.preferences.aiEnabled);
-  return (
-    <>
-      <form
-        className="panel"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const f = new FormData(e.currentTarget);
-          void run(async () => {
-            await api("/settings", {
-              zone: f.get("zone"),
-              dailyTime: f.get("dailyTime") || null,
-              weeklyTime: f.get("weeklyTime") || null,
-              weeklyDay: Number(f.get("weeklyDay")),
-              deadlineTime: f.get("deadlineTime") || null,
-              planNotify: f.has("planNotify"),
-              aiEnabled: ai,
-            });
-            await refresh();
-          });
-        }}
-      >
-        <h2>自分で決める確認時刻</h2>
-        <p className="muted">空欄は通知なし。起床・就寝時刻は推測しません。</p>
-        <label>
-          表示・通知タイムゾーン
-          <input name="zone" defaultValue={data.preferences.zone} required />
-        </label>
-        <label className="check">
-          <input
-            name="planNotify"
-            type="checkbox"
-            defaultChecked={data.preferences.planNotify}
-          />
-          自分で決めた着手時刻に通知
-        </label>
-        <label>
-          一日の確認
-          <input
-            name="dailyTime"
-            type="time"
-            defaultValue={data.preferences.dailyTime ?? ""}
-          />
-        </label>
-        <label>
-          登録漏れを照合する曜日
-          <select name="weeklyDay" defaultValue={data.preferences.weeklyDay}>
-            {["月", "火", "水", "木", "金", "土", "日"].map((d, i) => (
-              <option key={d} value={i + 1}>
-                {d}曜日
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          週の照合時刻
-          <input
-            name="weeklyTime"
-            type="time"
-            defaultValue={data.preferences.weeklyTime ?? ""}
-          />
-        </label>
-        <label>
-          確認済み期限の前日に確認する時刻
-          <input
-            name="deadlineTime"
-            type="time"
-            defaultValue={data.preferences.deadlineTime ?? ""}
-          />
-        </label>
-        <p className="muted">
-          この時刻は自分の確認予定です。実際の提出時刻とは別です。
-        </p>
-        <h2>外部AIの補助</h2>
-        <p>
-          {data.ai.configured
-            ? `設定先：${data.ai.endpoint}`
-            : "未設定：手入力とテンプレートで利用できます。"}
-        </p>
-        <p>
-          有効にして候補ボタンを押すと、タイトル・案内原文・次の一手・再開メモを設定先へ送ります。契約と費用条件は接続先で確認してください。
-        </p>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={ai}
-            onChange={(e) => setAi(e.target.checked)}
-            disabled={!data.ai.configured && !ai}
-          />
-          送信内容を理解し、外部AI補助を有効にする
-        </label>
-        <button disabled={busy}>設定を保存</button>
-      </form>
-      <section className="panel">
-        <h2>端末への通知</h2>
-        <p>
-          {data.push.configured
-            ? "配信設定あり"
-            : "配信設定不足：VAPIDの設定が必要です"}
-        </p>
-        <p>
-          端末の許可：
-          {typeof Notification === "undefined"
-            ? "この環境では非対応"
-            : Notification.permission === "granted"
-              ? "許可済み"
-              : Notification.permission === "denied"
-                ? "拒否されています。端末設定で変更できます。"
-                : "未許可"}
-        </p>
-        <p>
-          購読端末：{data.push.subscriptions} ／ worker：
-          {data.workerHeartbeat && Date.now() - data.workerHeartbeat < 120000
-            ? "稼働を確認"
-            : "稼働未確認・起動状態を確認してください"}
-        </p>
-        <p className="muted">
-          iPhoneはホーム画面へ追加し、そこから開いて許可します。通知本文には課題名や原文を出しません。
-        </p>
-        <div className="actions">
-          <button
-            disabled={busy || !data.push.configured}
-            onClick={() =>
-              void run(async () => {
-                if (
-                  !("serviceWorker" in navigator) ||
-                  !("PushManager" in window) ||
-                  typeof Notification === "undefined"
-                )
-                  throw new Error("この環境はWeb Pushに対応していません");
-                const permission = await Notification.requestPermission();
-                if (permission !== "granted")
-                  throw new Error("通知は許可されていません");
-                const reg = await navigator.serviceWorker.ready;
-                const key = Uint8Array.from(
-                  atob(
-                    data.push.publicKey.replace(/-/g, "+").replace(/_/g, "/"),
-                  ),
-                  (c) => c.charCodeAt(0),
-                );
-                const subscription =
-                  (await reg.pushManager.getSubscription()) ??
-                  (await reg.pushManager.subscribe({
-                    userVisibleOnly: true,
-                    applicationServerKey: key,
-                  }));
-                await api("/push/subscribe", subscription.toJSON());
-                await refresh();
-              })
-            }
-          >
-            この端末で通知を許可
-          </button>
-          <button
-            className="secondary"
-            disabled={busy || !data.push.subscriptions || !data.push.configured}
-            onClick={() =>
-              void run(async () => {
-                await api("/push/test", {});
-                await refresh();
-              })
-            }
-          >
-            テスト通知を予約
-          </button>
-        </div>
-        <p className="muted">
-          送信要求の受理は、端末への到達や本人の確認を意味しません。
-        </p>
-      </section>
-      <section className="panel">
-        <h2>Googleカレンダー</h2>
-        <p>
-          {data.google.connected
-            ? "Google認可済み"
-            : data.google.configured
-              ? "認可待ち"
-              : "未設定：コア機能はそのまま使えます"}
-        </p>
-        <p>専用カレンダー：{data.google.calendarId || "未指定"}</p>
-        <p className="muted">
-          確認した期限だけを一方向に反映します。原文は送りません。時刻未確認は終日予定です。
-        </p>
-        {!data.google.connected && (
-          <button
-            disabled={busy || !data.google.configured}
-            onClick={() =>
-              void run(async () => {
-                const r = await api("/google/connect", {});
-                location.href = r.url;
-              })
-            }
-          >
-            Googleの接続を設定
-          </button>
-        )}
-        {data.google.connected && !data.google.calendarId && (
-          <>
-            <button
-              disabled={busy}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "Googleに専用のtask-controlカレンダーを新規作成しますか？",
-                  )
-                )
-                  void run(async () => {
-                    await api("/google/calendar", { create: true, ack: true });
-                    await refresh();
-                  });
+      )}
+      {modal && !guide && (
+        <Sheet
+          title={modalTitles[modal.kind]}
+          error={error}
+          busy={busy}
+          close={() => {
+            setModal(null);
+            setError("");
+          }}
+        >
+          {modal.kind === "deadline" && (
+            <DeadlineForm
+              task={modal.task}
+              busy={busy}
+              close={() => {
+                setModal(null);
+                setError("");
               }}
-            >
-              専用カレンダーを新規作成
-            </button>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const id = new FormData(e.currentTarget).get("calendarId");
-                void run(async () => {
-                  await api("/google/calendar", {
-                    create: false,
-                    id,
+              save={(d) =>
+                perform(async () => {
+                  await api(`/tasks/${modal.task.id}/deadline`, {
+                    revision: modal.task.revision,
+                    deadline: d,
                     ack: true,
                   });
                   await refresh();
+                  setModal(null);
+                  setNotice(
+                    d.kind === "unknown"
+                      ? "締切は、分かったときに入力できます。"
+                      : "締切を保存しました。",
+                  );
+                })
+              }
+            />
+          )}
+          {modal.kind === "plan" && (
+            <PlanForm
+              task={modal.task}
+              busy={busy}
+              zone={zone}
+              save={(at) =>
+                perform(async () => {
+                  await api(`/tasks/${modal.task.id}/plan`, {
+                    revision: modal.task.revision,
+                    planAt: at,
+                  });
+                  await refresh();
+                  setModal(null);
+                  setNotice("取り組む予定を保存しました。締切は変わりません。");
+                })
+              }
+            />
+          )}
+          {modal.kind === "pause" && (
+            <PauseForm
+              task={modal.task}
+              busy={busy}
+              save={(memo) =>
+                perform(async () => {
+                  await mutate(modal.task, "pause", { memo });
+                  setModal(null);
+                  setNotice(
+                    "続きのメモを保存しました。またここから始められます。",
+                  );
+                })
+              }
+            />
+          )}
+          {modal.kind === "edit" && (
+            <EditForm
+              task={modal.task}
+              busy={busy}
+              save={(fields) =>
+                perform(async () => {
+                  await api(`/tasks/${modal.task.id}/edit`, {
+                    revision: modal.task.revision,
+                    fields,
+                  });
+                  await refresh();
+                  setModal(null);
+                  setNotice("課題の情報を保存しました。");
+                })
+              }
+            />
+          )}
+          {modal.kind === "finish" && (
+            <>
+              <p>
+                {modal.task.needsSubmission
+                  ? "課題の作業が全部終わったら、次は提出です。ここでは、まだ提出済みにはなりません。"
+                  : "課題の作業が全部終わったら、完了にできます。"}
+              </p>
+              {modal.task.totalDone && (
+                <div className="note">
+                  <span>全部終わったときの目安</span>
+                  <p>{modal.task.totalDone}</p>
+                </div>
+              )}
+              <button
+                className="primary wide"
+                disabled={busy}
+                onClick={() =>
+                  void perform(async () => {
+                    await mutate(modal.task, "work_done");
+                    setModal(null);
+                    setNotice(
+                      modal.task.needsSubmission
+                        ? "作業の終了を保存しました。あとは提出です。"
+                        : "作業の終了を保存しました。おつかれさまでした。",
+                    );
+                  })
+                }
+              >
+                {modal.task.needsSubmission
+                  ? "作業は終わった。提出へ進む"
+                  : "作業を完了にする"}
+              </button>
+              <button className="quiet wide" onClick={() => setModal(null)}>
+                まだ続ける
+              </button>
+            </>
+          )}
+          {modal.kind === "submit" && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void perform(async () => {
+                  await mutate(modal.task, "submit", { ack: true });
+                  setModal(null);
+                  setNotice("提出済みにしました。おつかれさまでした。");
                 });
               }}
             >
-              <label>
-                既存の専用カレンダーID
-                <input name="calendarId" required />
-              </label>
+              <p>
+                提出先の完了画面やメールで、送信できたことを確認してください。
+              </p>
               <label className="check">
                 <input type="checkbox" required />
-                メイン以外の専用カレンダーを同期先に指定する
+                提出先で、送信できたことを確認しました
               </label>
-              <button className="secondary" disabled={busy}>
-                この同期先を指定
+              <button className="primary wide" disabled={busy}>
+                提出済みにする
+                <Icon name="check" />
+              </button>
+              <button
+                type="button"
+                className="quiet wide"
+                onClick={() => setModal(null)}
+              >
+                まだ提出していない
               </button>
             </form>
-          </>
-        )}
-        {data.google.calendarId && (
-          <button
-            className="secondary"
-            disabled={busy}
-            onClick={() =>
-              void run(async () => {
-                await api("/google/retry", {});
-                await refresh();
-              })
-            }
-          >
-            失敗した同期を再試行
-          </button>
-        )}
-        {data.sync
-          .filter((s: any) => s.status === "failed")
-          .map((s: any) => (
-            <p className="error" key={s.task_id}>
-              {s.error}
-            </p>
-          ))}
-      </section>
-      <section className="panel">
-        <h2>通知の予定と履歴</h2>
-        {data.jobs.length === 0 ? (
-          <p>まだ通知予定はありません。</p>
-        ) : (
-          data.jobs.map((j: any) => (
-            <div className="history" key={j.id}>
+          )}
+          {modal.kind === "cancel" && (
+            <>
               <p>
-                {
-                  (
-                    {
-                      plan: "着手",
-                      daily: "一日の確認",
-                      weekly: "週の照合",
-                      deadline: "期限の確認",
-                      test: "テスト",
-                    } as any
-                  )[j.kind]
-                }{" "}
-                · {formatTime(j.due, data.preferences.zone)}
+                提出が必要な課題かどうか、確認してください。取りやめた課題は「終わった課題」から戻せます。
               </p>
-              <small>
-                {jobStates[j.status]}
-                {j.opened_at ? " ／ 通知リンクからアプリを開いた記録あり" : ""}
-              </small>
-              {j.error && <p>{j.error}</p>}
-            </div>
-          ))
-        )}
-      </section>
-    </>
+              <button
+                className="danger wide"
+                disabled={busy}
+                onClick={() =>
+                  void perform(async () => {
+                    await mutate(modal.task, "cancel", { ack: true });
+                    setModal(null);
+                  })
+                }
+              >
+                この課題を取りやめる
+              </button>
+            </>
+          )}
+          {modal.kind === "smaller" && (
+            <>
+              <p className="muted">今、どこで引っかかっていますか？</p>
+              <div className="choice-list">
+                {[
+                  [
+                    "unclear",
+                    "何をすればいいか分からない",
+                    "課題の内容を読むところから",
+                  ],
+                  [
+                    "large",
+                    "やることが大きすぎる",
+                    "最初の作業を、もう少し小さく",
+                  ],
+                  ["energy", "今は時間や元気がない", "取り組む時間を変える"],
+                  ["purpose", "やる意味が分からない", "目的を考えるところから"],
+                ].map(([reason, title, body]) => (
+                  <button
+                    className="choice"
+                    key={reason}
+                    disabled={busy}
+                    onClick={() => {
+                      if (reason === "energy") {
+                        setModal({ kind: "plan", task: modal.task });
+                        return;
+                      }
+                      void perform(async () => {
+                        await mutate(modal.task, "smaller", { reason });
+                        setModal(null);
+                        setNotice("最初にすることを、小さく変えました。");
+                      });
+                    }}
+                  >
+                    <span>
+                      <strong>{title}</strong>
+                      <small>{body}</small>
+                    </span>
+                    <Icon name="arrow" />
+                  </button>
+                ))}
+              </div>
+              <details>
+                <summary>別の候補も見てみる</summary>
+                <p className="caption">
+                  {settings.preferences.aiEnabled
+                    ? "課題の名前・案内・続きのメモを、設定した外部AIへ送ります。"
+                    : "外部AIを使わず、用意した例から候補を出します。"}
+                </p>
+                <button
+                  className="secondary wide"
+                  disabled={busy}
+                  onClick={() =>
+                    void perform(async () => {
+                      setSuggestion(
+                        await api(`/tasks/${modal.task.id}/suggest`, {}),
+                      );
+                    })
+                  }
+                >
+                  {settings.preferences.aiEnabled
+                    ? "AIに候補を聞く"
+                    : "作業の例を見てみる"}
+                </button>
+                {suggestion && (
+                  <div className="note">
+                    <span>
+                      {suggestion.source === "ai" ? "AIの候補" : "用意した例"}
+                    </span>
+                    <p>{suggestion.next}</p>
+                    {suggestion.notice && <p>{suggestion.notice}</p>}
+                    <button
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() =>
+                        void perform(async () => {
+                          await api(`/tasks/${modal.task.id}/edit`, {
+                            revision: modal.task.revision,
+                            fields: {
+                              next: suggestion.next,
+                              stepDone: suggestion.stepDone,
+                            },
+                          });
+                          await refresh();
+                          setModal(null);
+                          setSuggestion(null);
+                        })
+                      }
+                    >
+                      これから始めることにする
+                    </button>
+                  </div>
+                )}
+              </details>
+            </>
+          )}
+        </Sheet>
+      )}
+    </div>
   );
 }
 createRoot(document.getElementById("root")!).render(
