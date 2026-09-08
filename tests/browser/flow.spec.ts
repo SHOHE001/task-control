@@ -24,9 +24,11 @@ async function add(page: Page, title: string, original = "") {
     .getByRole("navigation")
     .getByRole("button", { name: "追加", exact: true })
     .click();
-  await page.getByLabel("課題の名前", { exact: true }).fill(title);
-  if (original) await page.getByLabel("届いた案内（任意）").fill(original);
+  await page
+    .getByLabel("課題名や、やりたいこと", { exact: true })
+    .fill(original ? `${title}。${original}` : title);
   await page.getByRole("button", { name: "課題を保存", exact: true }).click();
+  await page.getByRole("button", { name: "詳細を見る", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: title, exact: true }),
   ).toBeVisible();
@@ -160,15 +162,17 @@ test("failed registration keeps input and shows a useful error", async ({
     .getByRole("navigation")
     .getByRole("button", { name: "追加", exact: true })
     .click();
-  await page.getByLabel("課題の名前", { exact: true }).fill("架空の未保存");
-  await page.route("**/api/tasks", (route) =>
+  await page
+    .getByLabel("課題名や、やりたいこと", { exact: true })
+    .fill("架空の未保存");
+  await page.route("**/api/intake", (route) =>
     route.request().method() === "POST" ? route.abort() : route.continue(),
   );
   await page.getByRole("button", { name: "課題を保存" }).click();
   await expect(page.getByRole("alert")).toContainText("保存できませんでした");
-  await expect(page.getByLabel("課題の名前", { exact: true })).toHaveValue(
-    "架空の未保存",
-  );
+  await expect(
+    page.getByLabel("課題名や、やりたいこと", { exact: true }),
+  ).toHaveValue("架空の未保存");
 });
 test("tutorial is brief, skippable, persisted and can be reopened without creating tasks", async ({
   page,
@@ -290,4 +294,57 @@ test("PC sidebar, dark mode and enlarged text keep important actions accessible"
       .getByTestId("main-action")
       .getByRole("button", { name: "はじめる", exact: true }),
   ).toBeVisible();
+});
+
+test("one natural sentence saves a small action and separate start without extra fields", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await login(page);
+  await page
+    .getByRole("navigation")
+    .getByRole("button", { name: "追加", exact: true })
+    .click();
+  const input = page.getByLabel("課題名や、やりたいこと", { exact: true });
+  await expect(input).toBeFocused();
+  await expect(page.getByRole("textbox")).toHaveCount(1);
+  await page.keyboard.insertText(
+    "9月20日までに経済学レポート。明日の18時に少しだけやる",
+  );
+  await page.getByRole("button", { name: "課題を保存", exact: true }).click();
+  const result = page.getByRole("region", { name: "保存結果" });
+  await expect(
+    result.getByRole("heading", { name: "経済学レポート", exact: true }),
+  ).toBeVisible();
+  await expect(result).toContainText("資料を1つ開く");
+  await expect(result).toContainText("18:00");
+  await expect(result).toContainText("未確認の候補");
+  await expect(result).toContainText("Calendarは未接続");
+  await expect(page.getByRole("textbox")).toHaveCount(0);
+  const t = await taskData(page, "経済学レポート");
+  expect(t.deadline.date).toBeNull();
+  expect(t.deadline.confirmed).toBe(false);
+  expect(t.planAt).toBeTruthy();
+  expect(t.startPlan.origin).toBe("requested");
+  await noOverflow(page);
+  await page.screenshot({
+    path: "test-results/intake-result-pc.png",
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await noOverflow(page);
+  await page.screenshot({
+    path: "test-results/intake-result-mobile.png",
+    fullPage: true,
+  });
+  await result.getByRole("button", { name: "予定を変更・取り消す" }).click();
+  await page.getByRole("dialog").getByLabel("取り組む日時").fill("");
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "この時間にする" })
+    .click();
+  await expect(result).toContainText("着手予定：未作成");
+  const after = await taskData(page, "経済学レポート");
+  expect(after.planAt).toBeNull();
+  expect(after.deadline).toEqual(t.deadline);
 });

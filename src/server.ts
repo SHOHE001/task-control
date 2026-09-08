@@ -20,6 +20,7 @@ import {
 } from "./domain.ts";
 import { verify, sessionHash } from "./auth.ts";
 import { Google, suggest, aiConfiguration } from "./integrations.ts";
+import { intake, defaultPlan } from "./intake.ts";
 import { enqueue, schedule } from "./jobs.ts";
 export async function buildApp(
   store = new Store(),
@@ -121,6 +122,7 @@ export async function buildApp(
   });
   app.get("/api/tasks", async () => store.list());
   app.post("/api/tasks", async (req) => store.create(req.body));
+  app.post("/api/intake", async (req) => intake(store, req.body));
   app.get("/api/home", async () => ({
     ...choose(
       store.list(),
@@ -148,6 +150,12 @@ export async function buildApp(
       store.db
         .prepare("SELECT status,error,synced,desired FROM sync WHERE task_id=?")
         .get(req.params.id) ?? null,
+    workSync:
+      store.db
+        .prepare(
+          "SELECT status,error,synced,desired FROM work_sync WHERE task_id=?",
+        )
+        .get(req.params.id) ?? null,
     jobs: store.db
       .prepare(
         "SELECT kind,due,status,error,accepted_at,opened_at FROM jobs WHERE task_id=? ORDER BY due DESC LIMIT 20",
@@ -160,6 +168,8 @@ export async function buildApp(
       .parse(req.body);
     return store.change(req.params.id, revision, "edited", (t) => {
       Object.assign(t, fields);
+      if (fields.next !== undefined && t.startPlan)
+        t.startPlan.action = fields.next;
       if (fields.title) t.deadlineRevision++;
     });
   });
@@ -184,6 +194,22 @@ export async function buildApp(
             : null;
           t.deadlineRevision++;
           t.notificationRevision++;
+          if (
+            t.startPlan?.origin === "automatic" ||
+            (!t.startPlan &&
+              !t.planAt &&
+              t.deadline.confirmed &&
+              t.deadline.date)
+          ) {
+            const plan = defaultPlan(t, Date.now(), store.prefs().zone);
+            t.planAt = plan.at;
+            t.startPlan = {
+              durationMinutes: t.startPlan?.durationMinutes ?? 20,
+              action: t.startPlan?.action ?? t.next,
+              origin: "automatic",
+              reason: plan.reason,
+            };
+          }
         },
       );
     },
@@ -194,6 +220,12 @@ export async function buildApp(
       .parse(req.body);
     const t = store.change(req.params.id, x.revision, "planned", (t) => {
       t.planAt = x.planAt;
+      t.startPlan = {
+        durationMinutes: t.startPlan?.durationMinutes ?? 20,
+        action: t.startPlan?.action ?? t.next,
+        origin: "manual",
+        reason: "本人が着手予定を変更",
+      };
       t.deferUntil = x.planAt;
       t.notificationRevision++;
     });
@@ -320,7 +352,11 @@ export async function buildApp(
         "SELECT id,kind,due,status,error,accepted_at,opened_at FROM jobs ORDER BY due DESC LIMIT 30",
       )
       .all(),
-    sync: store.db.prepare("SELECT task_id,status,error FROM sync").all(),
+    sync: store.db
+      .prepare(
+        "SELECT task_id,status,error,'deadline' AS kind FROM sync UNION ALL SELECT task_id,status,error,'start' AS kind FROM work_sync",
+      )
+      .all(),
     weeklyCheckedAt: store.get("weeklyCheckedAt", null),
   }));
   app.post("/api/settings", async (req) => {
@@ -452,6 +488,9 @@ export async function buildApp(
   app.post("/api/google/retry", async () => {
     store.db
       .prepare("UPDATE sync SET status='pending',attempts=0,next_try=0")
+      .run();
+    store.db
+      .prepare("UPDATE work_sync SET status='pending',attempts=0,next_try=0")
       .run();
     return { ok: true };
   });

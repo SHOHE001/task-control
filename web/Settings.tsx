@@ -194,7 +194,8 @@ export function Settings({
         </p>
         <p>専用カレンダー：{data.google.calendarId || "未指定"}</p>
         <p className="muted">
-          確認した期限だけを一方向に反映します。原文は送りません。時刻未確認は終日予定です。
+          着手予定と本人確認済みの締切を、別々の予定として一方向に反映します。Any
+          Plannerでこの専用カレンダーを表示してください。原文は送りません。課題名と最初の行動は送られます。予定の変更・取消はtask-controlで行ってください。
         </p>
         {!data.google.connected && (
           <button
@@ -272,7 +273,7 @@ export function Settings({
         {data.sync
           .filter((s: any) => s.status === "failed")
           .map((s: any) => (
-            <p className="error" key={s.task_id}>
+            <p className="error" key={`${s.kind}:${s.task_id}`}>
               {s.error}
             </p>
           ))}

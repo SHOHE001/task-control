@@ -33,7 +33,8 @@ export function formatTime(value: string | number, zone = "Asia/Tokyo") {
 export function deadlineText(d: Deadline) {
   if (d.kind === "none")
     return d.confirmed ? "締切なし" : "締切なし・まだ未確認";
-  if (d.kind === "unknown") return "締切はまだ未入力";
+  if (d.kind === "unknown")
+    return d.evidence ? "締切はまだ未確認" : "締切はまだ未入力";
   const day = DateTime.fromISO(d.date!)
     .setLocale("ja")
     .toFormat("M月d日（ccc）");
