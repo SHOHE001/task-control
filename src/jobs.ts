@@ -192,6 +192,7 @@ export async function runNotifications(
             .run(sub.id);
       }
     }
+    const completedAt = timestamp();
     store.db
       .prepare(
         "UPDATE jobs SET status=?,due=?,accepted_at=?,error=? WHERE id=? AND status='sending'",
@@ -202,8 +203,8 @@ export async function runNotifications(
             ? "failed"
             : "pending"
           : "accepted",
-        failure ? now + 60000 * 2 ** Number(job.attempts) : job.due,
-        failure ? null : now,
+        failure ? completedAt + 60000 * 2 ** Number(job.attempts) : job.due,
+        failure ? null : completedAt,
         failure ? "送信失敗（到達は不明）" : null,
         job.id,
       );

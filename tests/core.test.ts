@@ -365,10 +365,10 @@ test("11c failed sends retry at most three times", async () => {
       sends++;
       throw new Error("offline");
     };
-    await runNotifications(s, now, send);
-    await runNotifications(s, now + 60001, send);
-    await runNotifications(s, now + 180002, send);
-    await runNotifications(s, now + 500000, send);
+    await runNotifications(s, now, send, () => 0);
+    await runNotifications(s, now + 60001, send, () => 0);
+    await runNotifications(s, now + 180002, send, () => 0);
+    await runNotifications(s, now + 500000, send, () => 0);
     assert.equal(sends, 3);
     assert.equal(
       s.db.prepare("SELECT status FROM jobs WHERE id='retry'").get()!.status,

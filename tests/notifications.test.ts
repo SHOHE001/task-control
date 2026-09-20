@@ -133,6 +133,11 @@ test("slow delivery timestamps each claim when it actually starts", async () => 
       () => elapsed,
     );
     assert.equal(attempts, 3);
+    assert.equal(
+      store.db.prepare("SELECT MAX(accepted_at) AS latest FROM jobs").get()!
+        .latest,
+      now + 60_000,
+    );
     await runNotifications(
       store,
       now + 60_000,
@@ -164,6 +169,52 @@ test("first claim after upgrade counts recent accepted jobs", async () => {
     await runNotifications(store, now, fail);
     await runNotifications(store, now + 15_000, fail);
     assert.equal(attempts, 1);
+  } finally {
+    store.close();
+  }
+});
+
+test("slow failed sends wait for backoff after completion", async () => {
+  const store = new Store(":memory:");
+  try {
+    fixture(store);
+    store.db.prepare("DELETE FROM jobs WHERE id!='job-0'").run();
+    let elapsed = 0;
+    let attempts = 0;
+    await runNotifications(
+      store,
+      now,
+      async () => {
+        attempts++;
+        elapsed += 120_000;
+        throw new Error("fixture timeout");
+      },
+      () => elapsed,
+    );
+    assert.equal(attempts, 1);
+    const job = store.db
+      .prepare("SELECT status,due FROM jobs WHERE id='job-0'")
+      .get()!;
+    assert.equal(job.status, "pending");
+    assert.equal(job.due, now + 180_000);
+    await runNotifications(
+      store,
+      now + 179_999,
+      async () => {
+        attempts++;
+      },
+      () => 0,
+    );
+    assert.equal(attempts, 1);
+    await runNotifications(
+      store,
+      now + 180_000,
+      async () => {
+        attempts++;
+      },
+      () => 0,
+    );
+    assert.equal(attempts, 2);
   } finally {
     store.close();
   }

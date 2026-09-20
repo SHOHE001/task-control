@@ -21,7 +21,7 @@ sudo systemctl enable --now task-control.service task-control-worker.service
 sudo systemctl status task-control.service task-control-worker.service
 ```
 
-ログは `journalctl -u task-control` / `journalctl -u task-control-worker`。秘密・原文をログしない実装です。設定画面のworker最終記録が2分以上古ければ停止やDBアクセスを確認します。Webだけの起動では通知は配信されません。通知ジョブの送信試行は成否を問わず1分間に最大3件とし、直近の試行時刻をDBへ保存します。ジョブ取得と枠の予約は同一トランザクションで行うため、再起動や処理の重なりでも上限を共有します。3回目の試行中に停止してリースが切れたジョブは、4回目を送らず到達不明の失敗として記録します。誤ってworkerを複数起動した場合はDBリースが処理の重複を抑制しますが、運用構成は単一workerとしてください。
+ログは `journalctl -u task-control` / `journalctl -u task-control-worker`。秘密・原文をログしない実装です。設定画面のworker最終記録が2分以上古ければ停止やDBアクセスを確認します。Webだけの起動では通知は配信されません。通知ジョブの送信試行は成否を問わず1分間に最大3件とし、直近の試行時刻をDBへ保存します。遅い応答があっても各ジョブの取得時刻で上限を数え、失敗後の再試行間隔は処理終了時刻から確保します。ジョブ取得と枠の予約は同一トランザクションで行うため、再起動や処理の重なりでも上限を共有します。3回目の試行中に停止してリースが切れたジョブは、4回目を送らず到達不明の失敗として記録します。誤ってworkerを複数起動した場合はDBリースが処理の重複を抑制しますが、運用構成は単一workerとしてください。
 
 ## HTTPS
 
