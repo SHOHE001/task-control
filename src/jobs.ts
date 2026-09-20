@@ -74,10 +74,18 @@ export async function runNotifications(
   store: Store,
   now = Date.now(),
   send?: Send,
+  monotonic: () => number = () => performance.now(),
 ) {
+  const startedAt = monotonic();
+  const timestamp = () => now + Math.floor(monotonic() - startedAt);
   store.db
     .prepare(
       "UPDATE jobs SET status='expired',error='通知時刻から1時間以上経過したため送信を省略' WHERE status IN ('pending','sending') AND expires<?",
+    )
+    .run(now);
+  store.db
+    .prepare(
+      "UPDATE jobs SET status='failed',error='最大試行後に処理が中断しました（到達は不明）' WHERE attempts>=3 AND (status='pending' OR (status='sending' AND lease<?))",
     )
     .run(now);
   store.db
@@ -107,25 +115,32 @@ export async function runNotifications(
     send = (s, p) =>
       webpush.sendNotification(s, p, { TTL: 3600, timeout: 10000 });
   }
-  // At most three due jobs per minute, even after restart. Existing accepted requests count.
-  const recent = Number(
-    store.db
-      .prepare("SELECT COUNT(*) AS n FROM jobs WHERE accepted_at>?")
-      .get(now - 60000)!.n,
-  );
-  for (let i = recent; i < 3; i++) {
+  // Reserve each attempt in the same transaction as its job, including failures.
+  // Persisted timestamps keep retries/restarts and overlapping workers in one window.
+  for (let i = 0; i < 3; i++) {
     const job = store.transaction(() => {
+      const claimedAt = timestamp();
+      const claims = (
+        store.get<number[] | null>("notificationClaims", null) ??
+        store.db
+          .prepare("SELECT accepted_at FROM jobs WHERE accepted_at>?")
+          .all(claimedAt - 60000)
+          .map((row) => Number(row.accepted_at))
+      ).filter((at) => at > claimedAt - 60000);
+      if (claims.length >= 3) return;
       const r = store.db
         .prepare(
-          "SELECT * FROM jobs WHERE status='pending' AND due<=? AND attempts<3 ORDER BY due DESC LIMIT 1",
+          "SELECT * FROM jobs WHERE status='pending' AND due<=? AND expires>=? AND attempts<3 ORDER BY due DESC LIMIT 1",
         )
-        .get(now);
-      if (r)
+        .get(claimedAt, claimedAt);
+      if (r) {
         store.db
           .prepare(
             "UPDATE jobs SET status='sending',lease=?,attempts=attempts+1 WHERE id=?",
           )
-          .run(now + 120000, r.id);
+          .run(claimedAt + 120000, r.id);
+        store.set("notificationClaims", [...claims, claimedAt]);
+      }
       return r;
     });
     if (!job) break;
@@ -177,6 +192,7 @@ export async function runNotifications(
             .run(sub.id);
       }
     }
+    const completedAt = timestamp();
     store.db
       .prepare(
         "UPDATE jobs SET status=?,due=?,accepted_at=?,error=? WHERE id=? AND status='sending'",
@@ -187,8 +203,8 @@ export async function runNotifications(
             ? "failed"
             : "pending"
           : "accepted",
-        failure ? now + 60000 * 2 ** Number(job.attempts) : job.due,
-        failure ? null : now,
+        failure ? completedAt + 60000 * 2 ** Number(job.attempts) : job.due,
+        failure ? null : completedAt,
         failure ? "送信失敗（到達は不明）" : null,
         job.id,
       );
